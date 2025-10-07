@@ -126,7 +126,7 @@ def ninox_list_tables(team_id: str, db_id: str):
 
 def resolve_table_id(table_hint: str) -> str:
     hint = (table_hint or "").strip()
-    # ✅ En Python es "and", no "&&"
+    # Python usa 'and', no '&&'
     if hint and " " not in hint and len(hint) <= 8:
         return hint
     for t in ninox_list_tables(TEAM_ID, DATABASE_ID):
@@ -708,6 +708,31 @@ def build_excel_like_example(df_reporte: pd.DataFrame, fecha_emision: str, clien
 
     bio = BytesIO(); wb.save(bio); return bio.getvalue()
 
+# ====== Helper: recarga sin caché para TAB 2 (clientes) ======
+def _reload_from_ninox_fresh():
+    """Lee Ninox forzando refresh de la caché y actualiza df_final_vista / df_final_num en session_state."""
+    try:
+        st.cache_data.clear()
+    except Exception:
+        pass
+    recs = ninox_list_records(TABLE_WRITE_NAME, limit=1000)
+    df_nx = ninox_records_to_df(recs)
+    if df_nx.empty:
+        return False, "No se recibieron registros desde Ninox."
+    st.session_state.df_final_vista = df_nx.copy()
+    tmp = df_nx.copy()
+    for h in ["Hp (10)","Hp (0.07)","Hp (3)"]:
+        tmp[h] = tmp[h].apply(hp_to_num)
+    tmp["_Hp10_NUM"]  = tmp["Hp (10)"]
+    tmp["_Hp007_NUM"] = tmp["Hp (0.07)"]
+    tmp["_Hp3_NUM"]   = tmp["Hp (3)"]
+    st.session_state.df_final_num = tmp[[
+        "_Hp10_NUM","_Hp007_NUM","_Hp3_NUM","PERIODO DE LECTURA","CLIENTE",
+        "CÓDIGO DE USUARIO","CÓDIGO DE DOSÍMETRO","NOMBRE","CÉDULA",
+        "TIPO DE DOSÍMETRO","FECHA DE LECTURA"
+    ]].copy()
+    return True, None
+
 # ============== UI: Tabs ==============
 tab1, tab2 = st.tabs(["1) Cargar y Subir a Ninox", "2) Reporte Final (sumas)"])
 
@@ -738,7 +763,7 @@ with tab1:
 
     subir_pm_como_texto = st.checkbox("Guardar 'PM' como texto en Ninox (si desmarcas, sube None en PM)", value=True)
 
-    # Helpers para comparación
+    # Helpers para comparación (TAB 1)
     def _mk_key(row: Dict[str, Any]) -> Tuple[str,str,str,str]:
         return (
             str(row.get("PERIODO DE LECTURA","")).strip().upper(),
@@ -905,6 +930,26 @@ with tab2:
         "Leer directamente de Ninox (tabla BASE DE DATOS)",
     ], index=0)
 
+    # Botones para refrescar CLIENTES
+    if fuente == "Leer directamente de Ninox (tabla BASE DE DATOS)":
+        if st.button("🔄 Actualizar CLIENTES (leer Ninox de nuevo)"):
+            ok, err = _reload_from_ninox_fresh()
+            if ok:
+                st.success("Clientes actualizados desde Ninox.")
+            else:
+                st.warning(err or "No fue posible refrescar desde Ninox.")
+        # Carga inicial fresca (útil si cambian de fuente)
+        if "df_final_vista" not in st.session_state or st.session_state.df_final_vista is None:
+            ok, err = _reload_from_ninox_fresh()
+            if not ok:
+                st.warning(err or "No se recibieron registros desde Ninox.")
+    else:
+        if st.button("🔁 Recalcular CLIENTES (desde esta sesión)"):
+            if "df_final_vista" in st.session_state and isinstance(st.session_state.df_final_vista, pd.DataFrame) and not st.session_state.df_final_vista.empty:
+                st.success("Clientes recalculados a partir de los datos procesados.")
+            else:
+                st.info("Primero procesa datos en el TAB 1.")
+
     # Nombre de archivo deseado
     nombre_archivo_base = st.text_input("Nombre de archivo para las descargas (sin extensión)", value="Reporte_Final")
 
@@ -913,24 +958,12 @@ with tab2:
     fecha_emision_ui = st.date_input("Fecha de emisión", value=pd.Timestamp.today()).strftime("%d/%m/%Y")
     logo_file = st.file_uploader("Logo opcional (PNG/JPG)", type=["png","jpg","jpeg"], key="logo_excel")
 
+    # Si eligieron leer de Ninox y no hay datos cargados aún, intenta cargar
     if fuente == "Leer directamente de Ninox (tabla BASE DE DATOS)":
-        try:
-            with st.spinner("Leyendo registros desde Ninox…"):
-                recs = ninox_list_records(TABLE_WRITE_NAME, limit=1000)
-                df_nx = ninox_records_to_df(recs)
-            if df_nx.empty:
-                st.warning("No se recibieron registros desde Ninox.")
-            else:
-                st.session_state.df_final_vista = df_nx.copy()
-                tmp = df_nx.copy()
-                for h in ["Hp (10)","Hp (0.07)","Hp (3)"]:
-                    tmp[h] = tmp[h].apply(hp_to_num)
-                tmp["_Hp10_NUM"]  = tmp["Hp (10)"]; tmp["_Hp007_NUM"] = tmp["Hp (0.07)"]; tmp["_Hp3_NUM"] = tmp["Hp (3)"]
-                st.session_state.df_final_num = tmp[["_Hp10_NUM","_Hp007_NUM","_Hp3_NUM","PERIODO DE LECTURA","CLIENTE",
-                                                     "CÓDIGO DE USUARIO","CÓDIGO DE DOSÍMETRO","NOMBRE","CÉDULA",
-                                                     "TIPO DE DOSÍMETRO","FECHA DE LECTURA"]].copy()
-        except Exception as e:
-            st.error(f"Error leyendo Ninox: {e}")
+        if "df_final_vista" not in st.session_state or st.session_state.df_final_vista is None:
+            ok, err = _reload_from_ninox_fresh()
+            if not ok:
+                st.warning(err or "No se recibieron registros desde Ninox.")
 
     df_vista = st.session_state.get("df_final_vista")
     df_num   = st.session_state.get("df_final_num")
@@ -968,6 +1001,7 @@ with tab2:
                                data=excel_bytes,
                                file_name=f"{base}.xlsx",
                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
 
 
 
