@@ -126,7 +126,8 @@ def ninox_list_tables(team_id: str, db_id: str):
 
 def resolve_table_id(table_hint: str) -> str:
     hint = (table_hint or "").strip()
-    if hint && " " not in hint and len(hint) <= 8:
+    # ✅ En Python es "and", no "&&"
+    if hint and " " not in hint and len(hint) <= 8:
         return hint
     for t in ninox_list_tables(TEAM_ID, DATABASE_ID):
         if str(t.get("name", "")).strip().lower() == hint.lower():
@@ -967,5 +968,6 @@ with tab2:
                                data=excel_bytes,
                                file_name=f"{base}.xlsx",
                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
 
 
