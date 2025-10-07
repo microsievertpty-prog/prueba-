@@ -344,76 +344,104 @@ def construir_registros(df_lista: pd.DataFrame, df_dosis: pd.DataFrame, periodos
     return df_final
 
 # ============== Resta de CONTROL + Formato ==============
-def aplicar_resta_control_y_formato(df_final: pd.DataFrame, umbral_pm: float = 0.005, manual_ctrl: Optional[float] = None) -> Tuple[pd.DataFrame, pd.DataFrame]:
+def aplicar_resta_control_y_formato(
+    df_final: pd.DataFrame,
+    umbral_pm: float = 0.005,
+    manual_ctrl: Optional[float] = None
+) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    Flujo:
+      - PERSONAS: resta promedio de CONTROL por PERIODO (o control manual), clip a 0 → formateo (PM si < umbral).
+      - CONTROL: NO se resta; se reporta crudo y SIEMPRE numérico (2 decimales).
+      - df_num: devuelve valores NUMÉRICOS post-resta (solo personas) + metadatos (para cálculos anuales).
+    """
     if df_final is None or df_final.empty:
         return df_final, df_final
 
+    # 1) Normalización numérica
     df = df_final.copy()
     for h in ["Hp (10)", "Hp (0.07)", "Hp (3)"]:
         if h not in df.columns:
             df[h] = 0.0
         df[h] = pd.to_numeric(df[h], errors="coerce").fillna(0.0)
+
     if "PERIODO DE LECTURA" in df.columns:
         df["PERIODO DE LECTURA"] = df["PERIODO DE LECTURA"].astype(str).map(normalizar_periodo)
 
-    is_ctrl = df["NOMBRE"].apply(is_control_name)
-    df_ctrl = df[is_ctrl].copy()
-    df_per  = df[~is_ctrl].copy()
+    # 2) Separar CONTROL vs PERSONAS
+    is_ctrl_mask = df["NOMBRE"].apply(is_control_name)
+    df_ctrl = df[is_ctrl_mask].copy()
+    df_per  = df[~is_ctrl_mask].copy()
 
+    # 3) Promedio CONTROL por PERIODO (para restar a PERSONAS)
     ctrl_means = pd.DataFrame(columns=["PERIODO DE LECTURA","Hp10_CTRL","Hp007_CTRL","Hp3_CTRL"])
     if not df_ctrl.empty:
-        ctrl_means = df_ctrl.groupby("PERIODO DE LECTURA", as_index=False).agg({
-            "Hp (10)":"mean","Hp (0.07)":"mean","Hp (3)":"mean"
-        }).rename(columns={"Hp (10)":"Hp10_CTRL","Hp (0.07)":"Hp007_CTRL","Hp (3)":"Hp3_CTRL"})
+        ctrl_means = (
+            df_ctrl.groupby("PERIODO DE LECTURA", as_index=False)
+            .agg({"Hp (10)":"mean","Hp (0.07)":"mean","Hp (3)":"mean"})
+            .rename(columns={"Hp (10)":"Hp10_CTRL","Hp (0.07)":"Hp007_CTRL","Hp (3)":"Hp3_CTRL"})
+        )
 
-    out = df_per.copy()
-    if not ctrl_means.empty:
-        out = out.merge(ctrl_means, on="PERIODO DE LECTURA", how="left")
-        out["Hp10_CTRL"]  = out["Hp10_CTRL"].fillna(0.0)
-        out["Hp007_CTRL"] = out["Hp007_CTRL"].fillna(0.0)
-        out["Hp3_CTRL"]   = out["Hp3_CTRL"].fillna(0.0)
-        out["_Hp10_NUM"]  = (out["Hp (10)"]   - out["Hp10_CTRL"]).clip(lower=0.0)
-        out["_Hp007_NUM"] = (out["Hp (0.07)"] - out["Hp007_CTRL"]).clip(lower=0.0)
-        out["_Hp3_NUM"]   = (out["Hp (3)"]    - out["Hp3_CTRL"]).clip(lower=0.0)
-    else:
-        if manual_ctrl is not None and float(manual_ctrl) > 0:
-            cval = float(manual_ctrl)
-            out["_Hp10_NUM"]  = (out["Hp (10)"]   - cval).clip(lower=0.0)
-            out["_Hp007_NUM"] = (out["Hp (0.07)"] - cval).clip(lower=0.0)
-            out["_Hp3_NUM"]   = (out["Hp (3)"]    - cval).clip(lower=0.0)
+    # 4) PERSONAS: aplicar resta (o control manual si no hay CONTROL)
+    out_per = df_per.copy()
+    if not out_per.empty:
+        if not ctrl_means.empty:
+            out_per = out_per.merge(ctrl_means, on="PERIODO DE LECTURA", how="left")
+            out_per["Hp10_CTRL"]  = out_per["Hp10_CTRL"].fillna(0.0)
+            out_per["Hp007_CTRL"] = out_per["Hp007_CTRL"].fillna(0.0)
+            out_per["Hp3_CTRL"]   = out_per["Hp3_CTRL"].fillna(0.0)
+            out_per["_Hp10_NUM"]  = (out_per["Hp (10)"]   - out_per["Hp10_CTRL"]).clip(lower=0.0)
+            out_per["_Hp007_NUM"] = (out_per["Hp (0.07)"] - out_per["Hp007_CTRL"]).clip(lower=0.0)
+            out_per["_Hp3_NUM"]   = (out_per["Hp (3)"]    - out_per["Hp3_CTRL"]).clip(lower=0.0)
         else:
-            out["_Hp10_NUM"]  = out["Hp (10)"]
-            out["_Hp007_NUM"] = out["Hp (0.07)"]
-            out["_Hp3_NUM"]   = out["Hp (3)"]
+            # No hay control en el período
+            if manual_ctrl is not None and float(manual_ctrl) > 0:
+                cval = float(manual_ctrl)
+                out_per["_Hp10_NUM"]  = (out_per["Hp (10)"]   - cval).clip(lower=0.0)
+                out_per["_Hp007_NUM"] = (out_per["Hp (0.07)"] - cval).clip(lower=0.0)
+                out_per["_Hp3_NUM"]   = (out_per["Hp (3)"]    - cval).clip(lower=0.0)
+            else:
+                out_per["_Hp10_NUM"]  = out_per["Hp (10)"]
+                out_per["_Hp007_NUM"] = out_per["Hp (0.07)"]
+                out_per["_Hp3_NUM"]   = out_per["Hp (3)"]
 
-    # Vista personas (PM permitido)
-    out_view = out.copy()
-    out_view["Hp (10)"]   = out_view["_Hp10_NUM"].map(lambda v: pmfmt2(v, umbral_pm))
-    out_view["Hp (0.07)"] = out_view["_Hp007_NUM"].map(lambda v: pmfmt2(v, umbral_pm))
-    out_view["Hp (3)"]    = out_view["_Hp3_NUM"].map(lambda v: pmfmt2(v, umbral_pm))
+        # Vista personas (PM si < umbral)
+        out_per_view = out_per.copy()
+        out_per_view["Hp (10)"]   = out_per_view["_Hp10_NUM"].map(lambda v: pmfmt2(v, umbral_pm))
+        out_per_view["Hp (0.07)"] = out_per_view["_Hp007_NUM"].map(lambda v: pmfmt2(v, umbral_pm))
+        out_per_view["Hp (3)"]    = out_per_view["_Hp3_NUM"].map(lambda v: pmfmt2(v, umbral_pm))
+    else:
+        out_per_view = pd.DataFrame(columns=df.columns.tolist() + ["_Hp10_NUM","_Hp007_NUM","_Hp3_NUM"])
 
-    # Vista control (SIEMPRE numérica)
-    df_ctrl_view = pd.DataFrame()
+    # 5) CONTROL: NO restar; siempre numérico
     if not df_ctrl.empty:
-        df_ctrl_view = df_ctrl.merge(ctrl_means, on="PERIODO DE LECTURA", how="left")
-        for c in ["Hp10_CTRL","Hp007_CTRL","Hp3_CTRL"]:
-            df_ctrl_view[c] = df_ctrl_view[c].fillna(0.0)
-        df_ctrl_view["_Hp10_NUM"]  = (df_ctrl_view["Hp (10)"]   - df_ctrl_view["Hp10_CTRL"]).clip(lower=0.0)
-        df_ctrl_view["_Hp007_NUM"] = (df_ctrl_view["Hp (0.07)"] - df_ctrl_view["Hp007_CTRL"]).clip(lower=0.0)
-        df_ctrl_view["_Hp3_NUM"]   = (df_ctrl_view["Hp (3)"]    - df_ctrl_view["Hp3_CTRL"]).clip(lower=0.0)
-        # <<< CONTROL: sin PM
+        df_ctrl_view = df_ctrl.copy()
+        df_ctrl_view["_Hp10_NUM"]  = pd.to_numeric(df_ctrl_view["Hp (10)"],   errors="coerce").fillna(0.0)
+        df_ctrl_view["_Hp007_NUM"] = pd.to_numeric(df_ctrl_view["Hp (0.07)"], errors="coerce").fillna(0.0)
+        df_ctrl_view["_Hp3_NUM"]   = pd.to_numeric(df_ctrl_view["Hp (3)"],    errors="coerce").fillna(0.0)
         df_ctrl_view["Hp (10)"]    = df_ctrl_view["_Hp10_NUM"].map(fmt_control_num)
         df_ctrl_view["Hp (0.07)"]  = df_ctrl_view["_Hp007_NUM"].map(fmt_control_num)
         df_ctrl_view["Hp (3)"]     = df_ctrl_view["_Hp3_NUM"].map(fmt_control_num)
+    else:
+        df_ctrl_view = pd.DataFrame(columns=df.columns.tolist() + ["_Hp10_NUM","_Hp007_NUM","_Hp3_NUM"])
 
-    df_vista = pd.concat([df_ctrl_view, out_view], ignore_index=True, sort=False)
+    # 6) Combinar vista CONTROL + PERSONAS
+    df_vista = pd.concat([df_ctrl_view, out_per_view], ignore_index=True, sort=False)
     if not df_vista.empty:
         df_vista["__is_control__"] = df_vista["NOMBRE"].apply(is_control_name)
-        df_vista = df_vista.sort_values(by=["__is_control__","NOMBRE","CÉDULA"], ascending=[False, True, True]).drop(columns=["__is_control__"])
+        df_vista = df_vista.sort_values(
+            by=["__is_control__","NOMBRE","CÉDULA"],
+            ascending=[False, True, True]
+        ).drop(columns=["__is_control__"], errors="ignore")
 
-    df_num = out[["_Hp10_NUM","_Hp007_NUM","_Hp3_NUM","PERIODO DE LECTURA","CLIENTE",
-                  "CÓDIGO DE USUARIO","CÓDIGO DE DOSÍMETRO","NOMBRE","CÉDULA",
-                  "TIPO DE DOSÍMETRO","FECHA DE LECTURA"]].copy()
+    # 7) df_num: devolver SOLO los numéricos post-resta (para PERSONAS) + metadatos
+    #    (CONTROL no se “usa” para sumas de personas; en construir_reporte_unico se manejan aparte)
+    cols_keep = [
+        "PERIODO DE LECTURA","CLIENTE","CÓDIGO DE USUARIO","CÓDIGO DE DOSÍMETRO",
+        "NOMBRE","CÉDULA","TIPO DE DOSÍMETRO","FECHA DE LECTURA"
+    ]
+    df_num = out_per[["_Hp10_NUM","_Hp007_NUM","_Hp3_NUM"] + cols_keep].copy()
+
     return df_vista, df_num
 
 # ============== REPORTE ÚNICO (CONTROL primero) ==============
@@ -1001,6 +1029,7 @@ with tab2:
                                data=excel_bytes,
                                file_name=f"{base}.xlsx",
                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
 
 
 
