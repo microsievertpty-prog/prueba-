@@ -723,6 +723,26 @@ with tab1:
 
     subir_pm_como_texto = st.checkbox("Guardar 'PM' como texto en Ninox (si desmarcas, sube None en PM)", value=True)
 
+    # >>> NEW: helper para llave y set de existentes
+    def _mk_key(row: Dict[str, Any]) -> Tuple[str,str,str,str]:
+        return (
+            str(row.get("PERIODO DE LECTURA","")).strip().upper(),
+            str(row.get("CÓDIGO DE DOSÍMETRO","")).strip().upper(),
+            str(row.get("CÓDIGO DE USUARIO","")).strip(),
+            strip_accents(str(row.get("NOMBRE","")).strip().upper()),
+        )
+
+    @st.cache_data(ttl=120, show_spinner=False)
+    def _fetch_existing_keys() -> set:
+        recs = ninox_list_records(TABLE_WRITE_NAME, limit=1000)
+        df = ninox_records_to_df(recs)
+        if df.empty:
+            return set()
+        keys = set()
+        for _, r in df.iterrows():
+            keys.add(_mk_key(r))
+        return keys
+
     if st.button("✅ Procesar y Previsualizar", type="primary"):
         if df_lista is None or df_lista.empty:
             st.error("Primero sube la LISTA DE CÓDIGO.")
@@ -751,7 +771,7 @@ with tab1:
                 st.caption(f"Controles detectados: {(st.session_state.df_final_vista['NOMBRE'].apply(is_control_name)).sum()}")
 
     st.markdown("---")
-    st.subheader("3) Subir TODO a Ninox (tabla **BASE DE DATOS**)")
+    st.subheader("3) Subir a Ninox")
 
     def _to_str(v):
         if pd.isna(v): return ""
@@ -759,15 +779,77 @@ with tab1:
             return v.strftime("%Y-%m-%d %H:%M:%S")
         return str(v)
 
-    def _hp_value_for_upload(v, as_text_pm=True):
-        if isinstance(v, str) and v.strip().upper() == "PM":
-            return "PM" if as_text_pm else None
-        try:
-            num = float(v)
-        except Exception:
-            return v if v is not None else None
-        return f"{num:.2f}" if as_text_pm else num
+    # >>> CHANGED: ahora acepta flag is_control
+    def _hp_value_for_upload(v, as_text_pm=True, is_control=False):
+        """
+        - Personas: si es 'PM' -> 'PM' (cuando as_text_pm=True), o None si as_text_pm=False.
+        - CONTROL: nunca 'PM'; si viene 'PM' lo convertimos a 0.00 (subir como número o string según as_text_pm).
+        """
+        sv = None if v is None else str(v).strip().upper()
+        if is_control:
+            # CONTROL: forzar número
+            try:
+                num = float(v)
+            except Exception:
+                num = 0.0 if sv == "PM" or sv in ("", "NONE", "NAN") else hp_to_num(v)
+            return f"{num:.2f}" if as_text_pm else num
+        else:
+            # Personas
+            if isinstance(v, str) and sv == "PM":
+                return "PM" if as_text_pm else None
+            try:
+                num = float(v)
+            except Exception:
+                return v if v is not None else None
+            return f"{num:.2f}" if as_text_pm else num
 
+    # >>> NEW: botón de actualización (solo nuevos)
+    if st.button("🔁 Actualizar en Ninox (solo NUEVOS)"):
+        df_vista = st.session_state.get("df_final_vista")
+        df_num   = st.session_state.get("df_final_num")
+        if df_vista is None or df_vista.empty or df_num is None or df_num.empty:
+            st.error("No hay datos procesados. Pulsa 'Procesar y Previsualizar' primero.")
+        else:
+            df_para_subir = construir_reporte_unico(df_vista, df_num)  # consolidado
+            if df_para_subir.empty:
+                st.error("Nada para subir después de consolidar.")
+            else:
+                existing = _fetch_existing_keys()
+                rows = []
+                nuevos = 0
+                for _, rowx in df_para_subir.iterrows():
+                    key = _mk_key(rowx)
+                    if key in existing:
+                        continue  # ya existe -> no subir
+                    is_ctrl = is_control_name(rowx.get("NOMBRE",""))
+                    fields = {
+                        "PERIODO DE LECTURA": _to_str(rowx.get("PERIODO DE LECTURA","")),
+                        "CLIENTE": _to_str(rowx.get("CLIENTE","")),
+                        "CÓDIGO DE DOSÍMETRO": _to_str(rowx.get("CÓDIGO DE DOSÍMETRO","")),
+                        "CÓDIGO DE USUARIO": _to_str(rowx.get("CÓDIGO DE USUARIO","")),
+                        "NOMBRE": _to_str(rowx.get("NOMBRE","")),
+                        "CÉDULA": _to_str(rowx.get("CÉDULA","")),
+                        "FECHA DE LECTURA": _to_str(rowx.get("FECHA DE LECTURA","")),
+                        "TIPO DE DOSÍMETRO": _to_str(rowx.get("TIPO DE DOSÍMETRO","") or "CE"),
+                        "Hp (10)": _hp_value_for_upload(rowx.get("Hp (10)"), as_text_pm=subir_pm_como_texto, is_control=is_ctrl),
+                        "Hp (0.07)": _hp_value_for_upload(rowx.get("Hp (0.07)"), as_text_pm=subir_pm_como_texto, is_control=is_ctrl),
+                        "Hp (3)": _hp_value_for_upload(rowx.get("Hp (3)"), as_text_pm=subir_pm_como_texto, is_control=is_ctrl),
+                    }
+                    rows.append({"fields": fields})
+                    nuevos += 1
+                if nuevos == 0:
+                    st.info("No hay registros NUEVOS que subir. Todo ya existe en Ninox con la llave definida.")
+                else:
+                    with st.spinner(f"Subiendo {nuevos} registro(s) nuevo(s) a Ninox..."):
+                        res = ninox_insert(TABLE_WRITE_NAME, rows, batch_size=300)
+                    if res.get("ok"):
+                        st.success(f"✅ Subido a Ninox: {res.get('inserted', 0)} registro(s) NUEVO(s).")
+                        st.toast("¡Actualización completada!", icon="✅")
+                        _fetch_existing_keys.clear()  # invalidar caché
+                    else:
+                        st.error(f"❌ Error al subir: {res.get('error')}")
+
+    # Botón original (sube TODO lo consolidado)
     if st.button("⬆️ Subir a Ninox (BASE DE DATOS)"):
         df_vista = st.session_state.get("df_final_vista")
         df_num   = st.session_state.get("df_final_num")
@@ -780,6 +862,7 @@ with tab1:
             else:
                 rows = []
                 for _, rowx in df_para_subir.iterrows():
+                    is_ctrl = is_control_name(rowx.get("NOMBRE",""))
                     fields = {
                         "PERIODO DE LECTURA": _to_str(rowx.get("PERIODO DE LECTURA","")),
                         "CLIENTE": _to_str(rowx.get("CLIENTE","")),
@@ -789,9 +872,10 @@ with tab1:
                         "CÉDULA": _to_str(rowx.get("CÉDULA","")),
                         "FECHA DE LECTURA": _to_str(rowx.get("FECHA DE LECTURA","")),
                         "TIPO DE DOSÍMETRO": _to_str(rowx.get("TIPO DE DOSÍMETRO","") or "CE"),
-                        "Hp (10)": _hp_value_for_upload(rowx.get("Hp (10)")),
-                        "Hp (0.07)": _hp_value_for_upload(rowx.get("Hp (0.07)")),
-                        "Hp (3)": _hp_value_for_upload(rowx.get("Hp (3)")),
+                        # >>> CHANGED: CONTROL no sube 'PM' jamás; personas mantienen 'PM' si aplica
+                        "Hp (10)": _hp_value_for_upload(rowx.get("Hp (10)"), as_text_pm=subir_pm_como_texto, is_control=is_ctrl),
+                        "Hp (0.07)": _hp_value_for_upload(rowx.get("Hp (0.07)"), as_text_pm=subir_pm_como_texto, is_control=is_ctrl),
+                        "Hp (3)": _hp_value_for_upload(rowx.get("Hp (3)"), as_text_pm=subir_pm_como_texto, is_control=is_ctrl),
                     }
                     rows.append({"fields": fields})
                 with st.spinner("Subiendo a Ninox..."):
@@ -809,6 +893,9 @@ with tab2:
         "Usar datos procesados en esta sesión",
         "Leer directamente de Ninox (tabla BASE DE DATOS)",
     ], index=0)
+
+    # >>> NEW: Nombre de archivo deseado
+    nombre_archivo_base = st.text_input("Nombre de archivo para las descargas (sin extensión)", value="Reporte_Final")  # se usa para CSV/Excel
 
     # Datos del encabezado del reporte
     codigo_reporte_ui = st.text_input("Código del reporte (opcional)", value="SIN-CÓDIGO")
@@ -855,8 +942,9 @@ with tab2:
             st.dataframe(reporte, use_container_width=True)
 
             # Descargas
+            base = re.sub(r"[^A-Za-z0-9_\- ]+", "_", nombre_archivo_base.strip()) or "Reporte_Final"  # sanitize
             csv_bytes = reporte.to_csv(index=False).encode("utf-8-sig")
-            st.download_button("⬇️ Descargar CSV (tabla)", data=csv_bytes, file_name="Reporte_Final.csv", mime="text/csv")
+            st.download_button("⬇️ Descargar CSV (tabla)", data=csv_bytes, file_name=f"{base}.csv", mime="text/csv")
 
             excel_bytes = build_excel_like_example(
                 df_reporte=reporte,
@@ -867,16 +955,8 @@ with tab2:
             )
             st.download_button("⬇️ Descargar Excel (con diseño y notas)",
                                data=excel_bytes,
-                               file_name="Reporte_Final.xlsx",
+                               file_name=f"{base}.xlsx",
                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-
-
-
-
-
-
-
-
 
 
 
