@@ -156,20 +156,18 @@ def ninox_insert(table_hint: str, rows: List[Dict[str, Any]], batch_size: int = 
     return {"ok": True, "inserted": inserted}
 
 @st.cache_data(ttl=300, show_spinner=False)
-def ninox_list_records(table_hint: str, page_size: int = 128, max_pages: int = 2000):
+def ninox_list_records(table_hint: str, page_size: int = 100, max_pages: int = 10000):
     """
-    Descarga TODOS los registros de la tabla:
-    - Usa page_size=128 (cap común).
-    - Corta al recibir página vacía o < page_size.
-    - Detecta repetición si el backend ignora 'skip'.
+    Descarga TODOS los registros de la tabla usando paginación simple:
+    - Ninox suele aceptar page_size<=100 (seguro).
+    - Continuamos hasta que la página venga vacía o con menos de page_size.
+    - Sin detección de repetición (que puede cortar anticipadamente).
     """
     table_id = resolve_table_id(table_hint)
     url = f"{BASE_URL}/teams/{TEAM_ID}/databases/{DATABASE_ID}/tables/{table_id}/records"
 
     out: List[Dict[str, Any]] = []
     skip = 0
-    last_first_id = None
-    seen_ids = set()
 
     for _ in range(max_pages):
         params = {"limit": page_size, "skip": skip}
@@ -177,27 +175,16 @@ def ninox_list_records(table_hint: str, page_size: int = 128, max_pages: int = 2
         r.raise_for_status()
         batch = r.json() or []
 
-        if not batch:
-            break
+        out.extend(batch)
 
-        current_first_id = batch[0].get("id") if isinstance(batch[0], dict) else None
-        if current_first_id is not None and current_first_id == last_first_id:
-            break  # misma página repetida
-        last_first_id = current_first_id
-
-        for rec in batch:
-            rid = rec.get("id")
-            if rid is None or rid not in seen_ids:
-                out.append(rec)
-                if rid is not None:
-                    seen_ids.add(rid)
-
+        # fin si ya no hay más
         if len(batch) < page_size:
             break
 
         skip += page_size
 
     return out
+
 
 def ninox_records_to_df(records: List[Dict[str,Any]]) -> pd.DataFrame:
     if not records: return pd.DataFrame()
@@ -1045,6 +1032,7 @@ with tab2:
                                data=excel_bytes,
                                file_name=f"{base}.xlsx",
                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
 
 
 
