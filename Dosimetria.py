@@ -19,7 +19,7 @@ TABLE_WRITE_NAME = "BASE DE DATOS"
 
 # ============== UI ==============
 st.set_page_config(page_title="Microsievert — Dosimetría", page_icon="🧪", layout="wide")
-st.title("🧪 Carga y Cruce de Dosis → Ninox (**BASE DE DATOS**)")
+st.title("Microsievert ☢️")
 
 # ============== Helpers ==============
 def strip_accents(s: str) -> str:
@@ -1286,6 +1286,18 @@ with tab2:
                                data=excel_bytes,
                                file_name=f"{base}.xlsx",
                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
