@@ -969,7 +969,7 @@ def _leer_reporte_consolidado(upload) -> Tuple[Optional[pd.DataFrame], Optional[
     # Normalizar periodo
     df["PERIODO DE LECTURA"] = df["PERIODO DE LECTURA"].astype(str).map(normalizar_periodo)
 
-    # Asegurar CÓDIGO DE USUARIO como texto (conserva '0062')
+    # Asegurar CÓDIGO DE USUARIO como texto (conserva '0000')
     if "CÓDIGO DE USUARIO" in df.columns:
         df["CÓDIGO DE USUARIO"] = df["CÓDIGO DE USUARIO"].astype(str).str.replace(r"\.0$", "", regex=True)
 
@@ -1296,6 +1296,7 @@ with tab2:
                                data=excel_bytes,
                                file_name=f"{base}.xlsx",
                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
 
 
 
