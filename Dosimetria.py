@@ -443,96 +443,238 @@ def aplicar_resta_control_y_formato(
     return df_vista, df_num
 
 # ============== REPORTE ÚNICO (CONTROL primero) ==============
-def construir_reporte_unico(df_vista: pd.DataFrame, df_num: pd.DataFrame, umbral_pm: float = 0.005, agrupar_control_por: str = "CLIENTE") -> pd.DataFrame:
+def construir_reporte_unico(
+    df_vista: pd.DataFrame,
+    df_num: pd.DataFrame,
+    umbral_pm: float = 0.005,
+    agrupar_control_por: str = "CLIENTE",
+) -> pd.DataFrame:
     if df_vista is None or df_vista.empty or df_num is None or df_num.empty:
         return pd.DataFrame()
 
     # Personas
     personas_num = df_num[~df_num["NOMBRE"].apply(is_control_name)].copy()
     if not personas_num.empty:
-        per_anual = personas_num.groupby("CÓDIGO DE USUARIO", as_index=False).agg({
-        "CLIENTE":"last","NOMBRE":"last","CÉDULA":"last","CÓDIGO DE DOSÍMETRO":"last",
-            "_Hp10_NUM":"sum","_Hp007_NUM":"sum","_Hp3_NUM":"sum"
-        }).rename(columns={"_Hp10_NUM":"Hp (10) ANUAL","_Hp007_NUM":"Hp (0.07) ANUAL","_Hp3_NUM":"Hp (3) ANUAL"})
-         personas_num["__fecha__"] = personas_num["PERIODO DE LECTURA"].map(periodo_to_date)
+        per_anual = (
+            personas_num.groupby("CÓDIGO DE USUARIO", as_index=False)
+            .agg({
+                "CLIENTE": "last",
+                "NOMBRE": "last",
+                "CÉDULA": "last",
+                "CÓDIGO DE DOSÍMETRO": "last",
+                "_Hp10_NUM": "sum",
+                "_Hp007_NUM": "sum",
+                "_Hp3_NUM": "sum",
+            })
+            .rename(
+                columns={
+                    "_Hp10_NUM": "Hp (10) ANUAL",
+                    "_Hp007_NUM": "Hp (0.07) ANUAL",
+                    "_Hp3_NUM": "Hp (3) ANUAL",
+                }
+            )
+        )
+
+        personas_num["__fecha__"] = personas_num["PERIODO DE LECTURA"].map(periodo_to_date)
         idx_last = personas_num.groupby("CÓDIGO DE USUARIO")["__fecha__"].idxmax()
-        per_last = personas_num.loc[idx_last, safe_cols(personas_num, [
-            "CÓDIGO DE USUARIO","PERIODO DE LECTURA","_Hp10_NUM","_Hp007_NUM","_Hp3_NUM",
-            "FECHA DE LECTURA","TIPO DE DOSÍMETRO"
-        ])].rename(columns={"_Hp10_NUM":"Hp (10)","_Hp007_NUM":"Hp (0.07)","_Hp3_NUM":"Hp (3)"})
+        per_last = personas_num.loc[
+            idx_last,
+            safe_cols(
+                personas_num,
+                [
+                    "CÓDIGO DE USUARIO",
+                    "PERIODO DE LECTURA",
+                    "_Hp10_NUM",
+                    "_Hp007_NUM",
+                    "_Hp3_NUM",
+                    "FECHA DE LECTURA",
+                    "TIPO DE DOSÍMETRO",
+                ],
+            ),
+        ].rename(
+            columns={
+                "_Hp10_NUM": "Hp (10)",
+                "_Hp007_NUM": "Hp (0.07)",
+                "_Hp3_NUM": "Hp (3)",
+            }
+        )
+
         per_view = per_anual.merge(per_last, on="CÓDIGO DE USUARIO", how="left")
-        for c in safe_cols(per_view, ["Hp (10)","Hp (0.07)","Hp (3)","Hp (10) ANUAL","Hp (0.07) ANUAL","Hp (3) ANUAL"]):
+        for c in safe_cols(
+            per_view,
+            [
+                "Hp (10)",
+                "Hp (0.07)",
+                "Hp (3)",
+                "Hp (10) ANUAL",
+                "Hp (0.07) ANUAL",
+                "Hp (3) ANUAL",
+            ],
+        ):
             per_view[c] = per_view[c].map(lambda v: pmfmt2(v, umbral_pm))
-        per_view["Hp (10) DE POR VIDA"]   = per_view["Hp (10) ANUAL"]
+
+        per_view["Hp (10) DE POR VIDA"] = per_view["Hp (10) ANUAL"]
         per_view["Hp (0.07) DE POR VIDA"] = per_view["Hp (0.07) ANUAL"]
-        per_view["Hp (3) DE POR VIDA"]    = per_view["Hp (3) ANUAL"]
-        personas_final = per_view[safe_cols(per_view, [
-            "PERIODO DE LECTURA","CLIENTE","CÓDIGO DE DOSÍMETRO","CÓDIGO DE USUARIO","NOMBRE","CÉDULA",
-            "FECHA DE LECTURA","TIPO DE DOSÍMETRO",
-            "Hp (10)","Hp (0.07)","Hp (3)",
-            "Hp (10) ANUAL","Hp (0.07) ANUAL","Hp (3) ANUAL",
-            "Hp (10) DE POR VIDA","Hp (0.07) DE POR VIDA","Hp (3) DE POR VIDA"
-        ])]
+        per_view["Hp (3) DE POR VIDA"] = per_view["Hp (3) ANUAL"]
+
+        personas_final = per_view[
+            safe_cols(
+                per_view,
+                [
+                    "PERIODO DE LECTURA",
+                    "CLIENTE",
+                    "CÓDIGO DE DOSÍMETRO",
+                    "CÓDIGO DE USUARIO",
+                    "NOMBRE",
+                    "CÉDULA",
+                    "FECHA DE LECTURA",
+                    "TIPO DE DOSÍMETRO",
+                    "Hp (10)",
+                    "Hp (0.07)",
+                    "Hp (3)",
+                    "Hp (10) ANUAL",
+                    "Hp (0.07) ANUAL",
+                    "Hp (3) ANUAL",
+                    "Hp (10) DE POR VIDA",
+                    "Hp (0.07) DE POR VIDA",
+                    "Hp (3) DE POR VIDA",
+                ],
+            )
+        ]
     else:
-        personas_final = pd.DataFrame(columns=[
-            "PERIODO DE LECTURA","CLIENTE","CÓDIGO DE DOSÍMETRO","CÓDIGO DE USUARIO","NOMBRE","CÉDULA",
-            "FECHA DE LECTURA","TIPO DE DOSÍMETRO",
-            "Hp (10)","Hp (0.07)","Hp (3)",
-            "Hp (10) ANUAL","Hp (0.07) ANUAL","Hp (3) ANUAL",
-            "Hp (10) DE POR VIDA","Hp (0.07) DE POR VIDA","Hp (3) DE POR VIDA"
-        ])
+        personas_final = pd.DataFrame(
+            columns=[
+                "PERIODO DE LECTURA",
+                "CLIENTE",
+                "CÓDIGO DE DOSÍMETRO",
+                "CÓDIGO DE USUARIO",
+                "NOMBRE",
+                "CÉDULA",
+                "FECHA DE LECTURA",
+                "TIPO DE DOSÍMETRO",
+                "Hp (10)",
+                "Hp (0.07)",
+                "Hp (3)",
+                "Hp (10) ANUAL",
+                "Hp (0.07) ANUAL",
+                "Hp (3) ANUAL",
+                "Hp (10) DE POR VIDA",
+                "Hp (0.07) DE POR VIDA",
+                "Hp (3) DE POR VIDA",
+            ]
+        )
 
     # Control (una fila por CLIENTE)
     control_v = df_vista[df_vista["NOMBRE"].apply(is_control_name)].copy()
     if not control_v.empty:
-        for h in safe_cols(control_v, ["Hp (10)","Hp (0.07)","Hp (3)"]):
+        for h in safe_cols(control_v, ["Hp (10)", "Hp (0.07)", "Hp (3)"]):
             control_v[h] = control_v[h].apply(hp_to_num)
+
         agr = agrupar_control_por if agrupar_control_por in control_v.columns else None
         if agr is None:
-            control_v["__grupo__"] = "GLOBAL"; agr = "__grupo__"
+            control_v["__grupo__"] = "GLOBAL"
+            agr = "__grupo__"
 
-        ctrl_anual = control_v.groupby(agr, as_index=False).agg({
-            "CLIENTE":"last","Hp (10)":"sum","Hp (0.07)":"sum","Hp (3)":"sum"
-        }).rename(columns={"Hp (10)":"Hp (10) ANUAL","Hp (0.07)":"Hp (0.07) ANUAL","Hp (3)":"Hp (3) ANUAL"})
+        ctrl_anual = (
+            control_v.groupby(agr, as_index=False)
+            .agg({"CLIENTE": "last", "Hp (10)": "sum", "Hp (0.07)": "sum", "Hp (3)": "sum"})
+            .rename(
+                columns={
+                    "Hp (10)": "Hp (10) ANUAL",
+                    "Hp (0.07)": "Hp (0.07) ANUAL",
+                    "Hp (3)": "Hp (3) ANUAL",
+                }
+            )
+        )
+
         tmp = control_v.copy()
         tmp["__fecha__"] = tmp["PERIODO DE LECTURA"].map(periodo_to_date)
         idx_last_c = tmp.groupby(agr)["__fecha__"].idxmax()
-        last_vals = tmp.loc[idx_last_c, safe_cols(tmp, [
-            agr,"PERIODO DE LECTURA","Hp (10)","Hp (0.07)","Hp (3)",
-            "CÓDIGO DE DOSÍMETRO","CÓDIGO DE USUARIO","CÉDULA","FECHA DE LECTURA","TIPO DE DOSÍMETRO"
-        ])]
+        last_vals = tmp.loc[
+            idx_last_c,
+            safe_cols(
+                tmp,
+                [
+                    agr,
+                    "PERIODO DE LECTURA",
+                    "Hp (10)",
+                    "Hp (0.07)",
+                    "Hp (3)",
+                    "CÓDIGO DE DOSÍMETRO",
+                    "CÓDIGO DE USUARIO",
+                    "CÉDULA",
+                    "FECHA DE LECTURA",
+                    "TIPO DE DOSÍMETRO",
+                ],
+            ),
+        ]
+
         ctrl_view = ctrl_anual.merge(last_vals, on=agr, how="left")
         ctrl_view["NOMBRE"] = "CONTROL"
 
         def _fill_usercode(row):
-            cu = str(row.get("CÓDIGO DE USUARIO","") or "").strip()
-            return cu if cu else str(row.get("CÓDIGO DE DOSÍMETRO","") or "").strip()
+            cu = str(row.get("CÓDIGO DE USUARIO", "") or "").strip()
+            return cu if cu else str(row.get("CÓDIGO DE DOSÍMETRO", "") or "").strip()
+
         ctrl_view["CÓDIGO DE USUARIO"] = ctrl_view.apply(_fill_usercode, axis=1)
 
-        for c in safe_cols(ctrl_view, ["Hp (10)","Hp (0.07)","Hp (3)",
-                                       "Hp (10) ANUAL","Hp (0.07) ANUAL","Hp (3) ANUAL"]):
+        # CONTROL: siempre numérico, sin "PM"
+        for c in safe_cols(
+            ctrl_view,
+            [
+                "Hp (10)",
+                "Hp (0.07)",
+                "Hp (3)",
+                "Hp (10) ANUAL",
+                "Hp (0.07) ANUAL",
+                "Hp (3) ANUAL",
+            ],
+        ):
             ctrl_view[c] = ctrl_view[c].map(fmt_control_num)
-        ctrl_view["Hp (10) DE POR VIDA"]   = ctrl_view["Hp (10) ANUAL"]
-        ctrl_view["Hp (0.07) DE POR VIDA"] = ctrl_view["Hp (0.07) ANUAL"]
-        ctrl_view["Hp (3) DE POR VIDA"]    = ctrl_view["Hp (3) ANUAL"]
 
-        ctrl_final = ctrl_view[safe_cols(ctrl_view, [
-            "PERIODO DE LECTURA","CLIENTE","CÓDIGO DE DOSÍMETRO","CÓDIGO DE USUARIO","NOMBRE","CÉDULA",
-            "FECHA DE LECTURA","TIPO DE DOSÍMETRO",
-            "Hp (10)","Hp (0.07)","Hp (3)",
-            "Hp (10) ANUAL","Hp (0.07) ANUAL","Hp (3) ANUAL",
-            "Hp (10) DE POR VIDA","Hp (0.07) DE POR VIDA","Hp (3) DE POR VIDA"
-        ])]
+        ctrl_view["Hp (10) DE POR VIDA"] = ctrl_view["Hp (10) ANUAL"]
+        ctrl_view["Hp (0.07) DE POR VIDA"] = ctrl_view["Hp (0.07) ANUAL"]
+        ctrl_view["Hp (3) DE POR VIDA"] = ctrl_view["Hp (3) ANUAL"]
+
+        ctrl_final = ctrl_view[
+            safe_cols(
+                ctrl_view,
+                [
+                    "PERIODO DE LECTURA",
+                    "CLIENTE",
+                    "CÓDIGO DE DOSÍMETRO",
+                    "CÓDIGO DE USUARIO",
+                    "NOMBRE",
+                    "CÉDULA",
+                    "FECHA DE LECTURA",
+                    "TIPO DE DOSÍMETRO",
+                    "Hp (10)",
+                    "Hp (0.07)",
+                    "Hp (3)",
+                    "Hp (10) ANUAL",
+                    "Hp (0.07) ANUAL",
+                    "Hp (3) ANUAL",
+                    "Hp (10) DE POR VIDA",
+                    "Hp (0.07) DE POR VIDA",
+                    "Hp (3) DE POR VIDA",
+                ],
+            )
+        ]
     else:
         ctrl_final = pd.DataFrame(columns=personas_final.columns)
 
+    # Unir CONTROL + PERSONAS
     reporte = pd.concat([ctrl_final, personas_final], ignore_index=True)
     if not reporte.empty:
         reporte["__is_control__"] = reporte["NOMBRE"].apply(is_control_name)
-        reporte = reporte.sort_values(
-            by=["__is_control__","CÓDIGO DE DOSÍMETRO","CÓDIGO DE USUARIO","NOMBRE"],
-            ascending=[False, True, True, True]
-        ).drop(columns=["__is_control__"])
+        reporte = (
+            reporte.sort_values(
+                by=["__is_control__", "CÓDIGO DE DOSÍMETRO", "CÓDIGO DE USUARIO", "NOMBRE"],
+                ascending=[False, True, True, True],
+            )
+            .drop(columns=["__is_control__"])
+        )
+
     return reporte
 
 # ============== Excel con diseño (como el ejemplo) ==============
@@ -1144,6 +1286,7 @@ with tab2:
                                data=excel_bytes,
                                file_name=f"{base}.xlsx",
                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
 
 
 
