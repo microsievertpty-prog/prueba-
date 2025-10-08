@@ -126,6 +126,7 @@ def ninox_list_tables(team_id: str, db_id: str):
 
 def resolve_table_id(table_hint: str) -> str:
     hint = (table_hint or "").strip()
+    # Si el hint ya parece ID (corto y sin espacios), úsalo
     if hint and " " not in hint and len(hint) <= 8:
         return hint
     for t in ninox_list_tables(TEAM_ID, DATABASE_ID):
@@ -184,6 +185,9 @@ def ninox_records_to_df(records: List[Dict[str,Any]]) -> pd.DataFrame:
     df = pd.DataFrame(rows)
     if "PERIODO DE LECTURA" in df.columns:
         df["PERIODO DE LECTURA"] = df["PERIODO DE LECTURA"].astype(str).map(normalizar_periodo)
+    # Asegurar CÓDIGO DE USUARIO como texto, preservando ceros
+    if "CÓDIGO DE USUARIO" in df.columns:
+        df["CÓDIGO DE USUARIO"] = df["CÓDIGO DE USUARIO"].astype(str).str.replace(r"\.0$", "", regex=True)
     return df
 
 # ============== Lectores archivos ==============
@@ -240,7 +244,8 @@ def leer_lista_codigo(upload) -> Optional[pd.DataFrame]:
 
     out = pd.DataFrame()
     out["CÉDULA"]            = df[c_ced] if c_ced else ""
-    out["CÓDIGO DE USUARIO"] = df[c_user] if c_user else ""
+    # Mantener como TEXTO y quitar posible ".0" heredado
+    out["CÓDIGO DE USUARIO"] = (df[c_user].astype(str).str.replace(r"\.0$", "", regex=True) if c_user else "")
     if c_nom and c_ap:
         out["NOMBRE"] = (df[c_nom].astype(str).str.strip() + " " + df[c_ap].astype(str).str.strip()).str.strip()
     elif c_nom:
@@ -326,7 +331,8 @@ def construir_registros(df_lista: pd.DataFrame, df_dosis: pd.DataFrame, periodos
             "PERIODO DE LECTURA": r["PERIODO DE LECTURA"],
             "CLIENTE": r.get("CLIENTE",""),
             "CÓDIGO DE DOSÍMETRO": cod,
-            "CÓDIGO DE USUARIO": r.get("CÓDIGO DE USUARIO",""),
+            # Mantener formato EXACTO del código de usuario
+            "CÓDIGO DE USUARIO": str(r.get("CÓDIGO DE USUARIO","")),
             "NOMBRE": nombre,
             "CÉDULA": r.get("CÉDULA",""),
             "FECHA DE LECTURA": fecha_str,
@@ -963,6 +969,10 @@ def _leer_reporte_consolidado(upload) -> Tuple[Optional[pd.DataFrame], Optional[
     # Normalizar periodo
     df["PERIODO DE LECTURA"] = df["PERIODO DE LECTURA"].astype(str).map(normalizar_periodo)
 
+    # Asegurar CÓDIGO DE USUARIO como texto (conserva '0062')
+    if "CÓDIGO DE USUARIO" in df.columns:
+        df["CÓDIGO DE USUARIO"] = df["CÓDIGO DE USUARIO"].astype(str).str.replace(r"\.0$", "", regex=True)
+
     # df_vista para mostrar (sin tocar posibles "PM")
     df_vista = df.copy()
 
@@ -1029,7 +1039,7 @@ with tab1:
         return (
             str(row.get("PERIODO DE LECTURA","")).strip().upper(),
             str(row.get("CÓDIGO DE DOSÍMETRO","")).strip().upper(),
-            str(row.get("CÓDIGO DE USUARIO","")).strip(),
+            str(row.get("CÓDIGO DE USUARIO","")).strip(),  # ya llega '0062' si venía así
             strip_accents(str(row.get("NOMBRE","")).strip().upper()),
         )
 
@@ -1125,7 +1135,7 @@ with tab1:
                         "PERIODO DE LECTURA": _to_str(rowx.get("PERIODO DE LECTURA","")),
                         "CLIENTE": _to_str(rowx.get("CLIENTE","")),
                         "CÓDIGO DE DOSÍMETRO": _to_str(rowx.get("CÓDIGO DE DOSÍMETRO","")),
-                        "CÓDIGO DE USUARIO": _to_str(rowx.get("CÓDIGO DE USUARIO","")),
+                        "CÓDIGO DE USUARIO": _to_str(rowx.get("CÓDIGO DE USUARIO","")),  # se conserva '0062'
                         "NOMBRE": _to_str(rowx.get("NOMBRE","")),
                         "CÉDULA": _to_str(rowx.get("CÉDULA","")),
                         "FECHA DE LECTURA": _to_str(rowx.get("FECHA DE LECTURA","")),
@@ -1165,7 +1175,7 @@ with tab1:
                         "PERIODO DE LECTURA": _to_str(rowx.get("PERIODO DE LECTURA","")),
                         "CLIENTE": _to_str(rowx.get("CLIENTE","")),
                         "CÓDIGO DE DOSÍMETRO": _to_str(rowx.get("CÓDIGO DE DOSÍMETRO","")),
-                        "CÓDIGO DE USUARIO": _to_str(rowx.get("CÓDIGO DE USUARIO","")),
+                        "CÓDIGO DE USUARIO": _to_str(rowx.get("CÓDIGO DE USUARIO","")),  # se conserva '0062'
                         "NOMBRE": _to_str(rowx.get("NOMBRE","")),
                         "CÉDULA": _to_str(rowx.get("CÉDULA","")),
                         "FECHA DE LECTURA": _to_str(rowx.get("FECHA DE LECTURA","")),
@@ -1253,7 +1263,7 @@ with tab2:
                 df_vista = df_vista[df_vista["CLIENTE"] == cliente_filtro].copy()
                 df_num   = df_num[df_num["CLIENTE"] == cliente_filtro].copy()
 
-        # ---- NUEVO FILTRO POR PERIODO(S)
+        # ---- FILTRO POR PERIODO(S)
         periodos_opts = sorted(df_vista["PERIODO DE LECTURA"].dropna().astype(str).unique().tolist())
         periodos_sel  = st.multiselect("Filtrar por PERIODO(S) a incluir (vacío = todos)", periodos_opts, default=[])
         if periodos_sel:
@@ -1286,14 +1296,6 @@ with tab2:
                                data=excel_bytes,
                                file_name=f"{base}.xlsx",
                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-
-
-
-
-
-
-
-
 
 
 
