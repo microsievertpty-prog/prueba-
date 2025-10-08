@@ -133,48 +133,43 @@ def resolve_table_id(table_hint: str) -> str:
             return str(t.get("id", "")).strip()
     return hint
 
+# (con caché) — la dejamos para usos ligeros si quieres
 @st.cache_data(ttl=300, show_spinner=False)
-def ninox_list_records(table_hint: str, page_size: int = 100, max_pages: int = 10000):
-    """
-    Descarga TODOS los registros de la tabla con paginación robusta.
-    """
+def ninox_list_records(table_hint: str, limit: int = 1000, max_pages: int = 50):
     table_id = resolve_table_id(table_hint)
     url = f"{BASE_URL}/teams/{TEAM_ID}/databases/{DATABASE_ID}/tables/{table_id}/records"
-
-    out: List[Dict[str, Any]] = []
-    skip = 0
-
+    out: List[Dict[str, Any]] = []; skip = 0
     for _ in range(max_pages):
-        params = {"limit": page_size, "skip": skip}
-        try:
-            r = requests.get(url, headers=ninox_headers(), params=params, timeout=60)
-            r.raise_for_status()
-        except requests.RequestException as e:
-            raise RuntimeError(f"Error leyendo Ninox (paginación): {e}")
-
+        params = {"limit": limit, "skip": skip}
+        r = requests.get(url, headers=ninox_headers(), params=params, timeout=60)
+        r.raise_for_status()
         batch = r.json() or []
+        if not batch: break
         out.extend(batch)
-
-        if len(batch) < page_size:
-            break
-
-        skip += page_size
-
+        if len(batch) < limit: break
+        skip += limit
     return out
 
-def ninox_insert(table_hint: str, rows: List[Dict[str, Any]], batch_size: int = 300) -> Dict[str, Any]:
+# === NUEVO: lectura SIN CACHÉ y sin límite práctico ===
+def ninox_fetch_all_records(table_hint: str, page_size: int = 200, max_pages: int = 10000, timeout: int = 20) -> List[Dict[str, Any]]:
     table_id = resolve_table_id(table_hint)
     url = f"{BASE_URL}/teams/{TEAM_ID}/databases/{DATABASE_ID}/tables/{table_id}/records"
-    n, inserted = len(rows), 0
-    if n == 0:
-        return {"ok": True, "inserted": 0}
-    for i in range(0, n, batch_size):
-        chunk = rows[i:i+batch_size]
-        r = requests.post(url, headers=ninox_headers(), json=chunk, timeout=60)
-        if r.status_code != 200:
-            return {"ok": False, "inserted": inserted, "error": f"{r.status_code} {r.text}"}
-        inserted += len(chunk)
-    return {"ok": True, "inserted": inserted}
+    out: List[Dict[str, Any]] = []
+    skip = 0
+    session = requests.Session()
+    for page in range(max_pages):
+        params = {"limit": page_size, "skip": skip}
+        try:
+            r = session.get(url, headers=ninox_headers(), params=params, timeout=timeout)
+            r.raise_for_status()
+        except requests.RequestException as e:
+            raise RuntimeError(f"Error leyendo Ninox (página {page+1}, skip={skip}): {e}")
+        batch = r.json() or []
+        out.extend(batch)
+        if len(batch) < page_size:
+            break
+        skip += page_size
+    return out
 
 def ninox_records_to_df(records: List[Dict[str,Any]]) -> pd.DataFrame:
     if not records: return pd.DataFrame()
@@ -445,13 +440,12 @@ def aplicar_resta_control_y_formato(
             ascending=[False, True, True]
         ).drop(columns=["__is_control__"], errors="ignore")
 
-    # 7) df_num (para sumas anuales/de por vida) — solo personas post-resta
+    # 7) df_num: numéricos post-resta (solo personas) + metadatos
     cols_keep = [
         "PERIODO DE LECTURA","CLIENTE","CÓDIGO DE USUARIO","CÓDIGO DE DOSÍMETRO",
         "NOMBRE","CÉDULA","TIPO DE DOSÍMETRO","FECHA DE LECTURA"
     ]
     df_num = out_per[["_Hp10_NUM","_Hp007_NUM","_Hp3_NUM"] + cols_keep].copy()
-
     return df_vista, df_num
 
 # ============== REPORTE ÚNICO (CONTROL primero) ==============
@@ -747,50 +741,41 @@ def build_excel_like_example(df_reporte: pd.DataFrame, fecha_emision: str, clien
 
 # ====== Helper: recarga sin caché para TAB 2 (clientes) ======
 def _reload_from_ninox_fresh():
-    """
-    Lee Ninox forzando limpieza de caché y pasa los datos a session_state.
-    Devuelve (ok, err). Si ok=False, err trae el mensaje para mostrar.
-    """
+    """Lee Ninox forzando refresh (sin cachear el payload grande) y actualiza session_state."""
     try:
         st.cache_data.clear()
     except Exception:
         pass
 
-    with st.spinner("Leyendo registros desde Ninox…"):
+    with st.status("Leyendo registros desde Ninox…", expanded=True) as status:
         try:
-            recs = ninox_list_records(TABLE_WRITE_NAME, page_size=100)
+            status.update(label="Consultando API de Ninox…", state="running")
+            # TRAE TODO
+            recs = ninox_fetch_all_records(TABLE_WRITE_NAME, page_size=200, timeout=20)
         except Exception as e:
+            status.update(label="Fallo leyendo Ninox", state="error")
             return False, f"Fallo leyendo Ninox: {e}"
 
-    df_nx = ninox_records_to_df(recs)
-    if df_nx.empty:
-        return False, "No se recibieron registros desde Ninox."
+        df_nx = ninox_records_to_df(recs)
+        if df_nx.empty:
+            status.update(label="Sin datos en Ninox", state="warning")
+            return False, "No se recibieron registros desde Ninox."
 
-    st.session_state.df_final_vista = df_nx.copy()
+        st.session_state.df_final_vista = df_nx.copy()
+        tmp = df_nx.copy()
+        for h in ["Hp (10)","Hp (0.07)","Hp (3)"]:
+            tmp[h] = tmp[h].apply(hp_to_num)
+        tmp["_Hp10_NUM"]  = tmp["Hp (10)"]
+        tmp["_Hp007_NUM"] = tmp["Hp (0.07)"]
+        tmp["_Hp3_NUM"]   = tmp["Hp (3)"]
+        st.session_state.df_final_num = tmp[[
+            "_Hp10_NUM","_Hp007_NUM","_Hp3_NUM","PERIODO DE LECTURA","CLIENTE",
+            "CÓDIGO DE USUARIO","CÓDIGO DE DOSÍMETRO","NOMBRE","CÉDULA",
+            "TIPO DE DOSÍMETRO","FECHA DE LECTURA"
+        ]].copy()
 
-    tmp = df_nx.copy()
-    for h in ["Hp (10)","Hp (0.07)","Hp (3)"]:
-        tmp[h] = tmp[h].apply(hp_to_num)
-    tmp["_Hp10_NUM"]  = tmp["Hp (10)"]
-    tmp["_Hp007_NUM"] = tmp["Hp (0.07)"]
-    tmp["_Hp3_NUM"]   = tmp["Hp (3)"]
-
-    st.session_state.df_final_num = tmp[[
-        "_Hp10_NUM","_Hp007_NUM","_Hp3_NUM","PERIODO DE LECTURA","CLIENTE",
-        "CÓDIGO DE USUARIO","CÓDIGO DE DOSÍMETRO","NOMBRE","CÉDULA",
-        "TIPO DE DOSÍMETRO","FECHA DE LECTURA"
-    ]].copy()
-
-    # Diagnóstico
-    st.success(f"Leídos {len(df_nx)} registros desde Ninox.")
-    try:
-        vals = (df_nx["PERIODO DE LECTURA"].dropna().astype(str).value_counts().head(8))
-        st.caption("Top PERIODO DE LECTURA:")
-        st.write(vals)
-    except Exception:
-        pass
-
-    return True, None
+        status.update(label=f"Leídos {len(df_nx)} registro(s) de Ninox", state="complete")
+        return True, None
 
 # ============== UI: Tabs ==============
 tab1, tab2 = st.tabs(["1) Cargar y Subir a Ninox", "2) Reporte Final (sumas)"])
@@ -833,7 +818,7 @@ with tab1:
 
     def _fetch_existing_keys_fresh() -> set:
         """SIN caché: lee de Ninox y construye set de llaves existentes."""
-        recs = ninox_list_records(TABLE_WRITE_NAME, page_size=100)
+        recs = ninox_fetch_all_records(TABLE_WRITE_NAME, page_size=200, timeout=20)
         df = ninox_records_to_df(recs)
         if df.empty:
             return set()
@@ -881,7 +866,7 @@ with tab1:
     def _hp_value_for_upload(v, as_text_pm=True, is_control=False):
         """
         - Personas: si es 'PM' -> 'PM' (cuando as_text_pm=True), o None si as_text_pm=False.
-        - CONTROL: nunca 'PM'; si viene 'PM' lo convertimos a 0.00 (subir como número o string según as_text_pm).
+        - CONTROL: nunca 'PM'; si viene 'PM' lo convertimos a 0.00 (num o string según as_text_pm).
         """
         sv = None if v is None else str(v).strip().upper()
         if is_control:
@@ -995,12 +980,11 @@ with tab2:
             if ok:
                 st.success("Clientes actualizados desde Ninox.")
             else:
-                st.error(err)
-
+                st.warning(err or "No fue posible refrescar desde Ninox.")
         if "df_final_vista" not in st.session_state or st.session_state.df_final_vista is None:
             ok, err = _reload_from_ninox_fresh()
             if not ok:
-                st.error(err)
+                st.warning(err or "No se recibieron registros desde Ninox.")
     else:
         if st.button("🔁 Recalcular CLIENTES (desde esta sesión)"):
             if "df_final_vista" in st.session_state and isinstance(st.session_state.df_final_vista, pd.DataFrame) and not st.session_state.df_final_vista.empty:
@@ -1016,12 +1000,19 @@ with tab2:
     fecha_emision_ui = st.date_input("Fecha de emisión", value=pd.Timestamp.today()).strftime("%d/%m/%Y")
     logo_file = st.file_uploader("Logo opcional (PNG/JPG)", type=["png","jpg","jpeg"], key="logo_excel")
 
+    # Si eligieron leer de Ninox y no hay datos cargados aún, intenta cargar
+    if fuente == "Leer directamente de Ninox (tabla BASE DE DATOS)":
+        if "df_final_vista" not in st.session_state or st.session_state.df_final_vista is None:
+            ok, err = _reload_from_ninox_fresh()
+            if not ok:
+                st.warning(err or "No se recibieron registros desde Ninox.")
+
     df_vista = st.session_state.get("df_final_vista")
     df_num   = st.session_state.get("df_final_num")
     if df_vista is None or df_vista.empty or df_num is None or df_num.empty:
         st.info("No hay datos para mostrar en el reporte final.")
     else:
-        # Filtros
+        # Filtro por CLIENTE
         clientes = sorted([c for c in df_vista["CLIENTE"].dropna().unique().tolist() if str(c).strip()])
         cliente_filtro = None
         if clientes:
@@ -1031,15 +1022,16 @@ with tab2:
                 df_vista = df_vista[df_vista["CLIENTE"] == cliente_filtro].copy()
                 df_num   = df_num[df_num["CLIENTE"] == cliente_filtro].copy()
 
-        periodos_opts = sorted(df_vista["PERIODO DE LECTURA"].dropna().astype(str).unique().tolist())
-        periodos_sel2 = st.multiselect("Filtrar por PERIODO DE LECTURA (uno o varios; vacío = TODOS)", periodos_opts, default=[])
-        if periodos_sel2:
-            df_vista = df_vista[df_vista["PERIODO DE LECTURA"].isin(periodos_sel2)].copy()
-            df_num   = df_num[df_num["PERIODO DE LECTURA"].isin(periodos_sel2)].copy()
+        # Filtro por PERIODO
+        periodos_all = sorted(df_vista["PERIODO DE LECTURA"].dropna().astype(str).unique().tolist())
+        periodos_filtro = st.multiselect("Filtrar por PERIODO DE LECTURA (opcional, vacío = TODOS)", periodos_all, default=[])
+        if periodos_filtro:
+            df_vista = df_vista[df_vista["PERIODO DE LECTURA"].isin(periodos_filtro)].copy()
+            df_num   = df_num[df_num["PERIODO DE LECTURA"].isin(periodos_filtro)].copy()
 
         reporte = construir_reporte_unico(df_vista, df_num, umbral_pm=0.005, agrupar_control_por="CLIENTE")
         if reporte.empty:
-            st.info("No hay datos para el reporte con el filtro aplicado.")
+            st.info("No hay datos para el reporte con el/los filtro(s) aplicado(s).")
         else:
             st.dataframe(reporte, use_container_width=True)
 
