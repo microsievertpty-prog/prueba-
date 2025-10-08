@@ -114,35 +114,25 @@ def periodo_to_date(s: str):
         return pd.NaT
 
 # ============== Ninox helpers ==============
+# ============== Ninox helpers ==============
 def ninox_headers():
     return {"Authorization": f"Bearer {API_TOKEN}", "Content-Type": "application/json"}
 
 @st.cache_data(ttl=300, show_spinner=False)
-def ninox_list_records(table_hint: str, page_size: int = 500):
-    """
-    Descarga TODOS los registros de la tabla sin límite práctico de páginas.
-    - Sigue pidiendo páginas hasta que la API devuelva una lista vacía.
-    - Avanza 'skip' por la cantidad realmente recibida (la API puede capar el page_size).
-    """
-    table_id = resolve_table_id(table_hint)
-    url = f"{BASE_URL}/teams/{TEAM_ID}/databases/{DATABASE_ID}/tables/{table_id}/records"
+def ninox_list_tables(team_id: str, db_id: str):
+    url = f"{BASE_URL}/teams/{team_id}/databases/{db_id}/tables"
+    r = requests.get(url, headers=ninox_headers(), timeout=30)
+    r.raise_for_status()
+    return r.json()
 
-    out: List[Dict[str, Any]] = []
-    skip = 0
-
-    while True:
-        params = {"limit": page_size, "skip": skip}
-        r = requests.get(url, headers=ninox_headers(), params=params, timeout=60)
-        r.raise_for_status()
-        batch = r.json() or []
-
-        if not batch:
-            break  # no hay más páginas
-
-        out.extend(batch)
-        skip += len(batch)  # avanzar por lo que realmente llegó (no por el page_size)
-
-    return out
+def resolve_table_id(table_hint: str) -> str:
+    hint = (table_hint or "").strip()
+    if hint and " " not in hint and len(hint) <= 8:
+        return hint
+    for t in ninox_list_tables(TEAM_ID, DATABASE_ID):
+        if str(t.get("name", "")).strip().lower() == hint.lower():
+            return str(t.get("id", "")).strip()
+    return hint
 
 def ninox_insert(table_hint: str, rows: List[Dict[str, Any]], batch_size: int = 300) -> Dict[str, Any]:
     table_id = resolve_table_id(table_hint)
@@ -159,19 +149,25 @@ def ninox_insert(table_hint: str, rows: List[Dict[str, Any]], batch_size: int = 
     return {"ok": True, "inserted": inserted}
 
 @st.cache_data(ttl=300, show_spinner=False)
-def ninox_list_records(table_hint: str, limit: int = 1000, max_pages: int = 50):
+def ninox_list_records(table_hint: str, page_size: int = 500):
+    """
+    Trae TODOS los registros paginando hasta que la API no devuelva más.
+    No asume que respete page_size (Ninox puede capar a 128).
+    """
     table_id = resolve_table_id(table_hint)
     url = f"{BASE_URL}/teams/{TEAM_ID}/databases/{DATABASE_ID}/tables/{table_id}/records"
-    out: List[Dict[str, Any]] = []; skip = 0
-    for _ in range(max_pages):
-        params = {"limit": limit, "skip": skip}
+
+    out: List[Dict[str, Any]] = []
+    skip = 0
+    while True:
+        params = {"limit": page_size, "skip": skip}
         r = requests.get(url, headers=ninox_headers(), params=params, timeout=60)
         r.raise_for_status()
         batch = r.json() or []
-        if not batch: break
+        if not batch:
+            break
         out.extend(batch)
-        if len(batch) < limit: break
-        skip += limit
+        skip += len(batch)  # avanzar por lo realmente recibido
     return out
 
 def ninox_records_to_df(records: List[Dict[str,Any]]) -> pd.DataFrame:
@@ -750,26 +746,36 @@ def build_excel_like_example(df_reporte: pd.DataFrame, fecha_emision: str, clien
 def _reload_from_ninox_fresh():
     """Lee Ninox forzando refresh de la caché y actualiza df_final_vista / df_final_num en session_state."""
     try:
-        st.cache_data.clear()
+        st.cache_data.clear()  # limpiar caché para forzar lectura fresca
     except Exception:
         pass
-    recs = ninox_list_records(TABLE_WRITE_NAME) 
-    df_nx = ninox_records_to_df(recs)
-    if df_nx.empty:
-        return False, "No se recibieron registros desde Ninox."
-    st.session_state.df_final_vista = df_nx.copy()
-    tmp = df_nx.copy()
-    for h in ["Hp (10)","Hp (0.07)","Hp (3)"]:
-        tmp[h] = tmp[h].apply(hp_to_num)
-    tmp["_Hp10_NUM"]  = tmp["Hp (10)"]
-    tmp["_Hp007_NUM"] = tmp["Hp (0.07)"]
-    tmp["_Hp3_NUM"]   = tmp["Hp (3)"]
-    st.session_state.df_final_num = tmp[[
-        "_Hp10_NUM","_Hp007_NUM","_Hp3_NUM","PERIODO DE LECTURA","CLIENTE",
-        "CÓDIGO DE USUARIO","CÓDIGO DE DOSÍMETRO","NOMBRE","CÉDULA",
-        "TIPO DE DOSÍMETRO","FECHA DE LECTURA"
-    ]].copy()
-    return True, None
+
+    try:
+        recs = ninox_list_records(TABLE_WRITE_NAME)  # sin 'limit': pagina hasta que no haya más
+        df_nx = ninox_records_to_df(recs)
+        if df_nx.empty:
+            return False, "No se recibieron registros desde Ninox."
+
+        # Guardar para TAB 2
+        st.session_state.df_final_vista = df_nx.copy()
+
+        tmp = df_nx.copy()
+        for h in ["Hp (10)", "Hp (0.07)", "Hp (3)"]:
+            tmp[h] = tmp[h].apply(hp_to_num)
+        tmp["_Hp10_NUM"]  = tmp["Hp (10)"]
+        tmp["_Hp007_NUM"] = tmp["Hp (0.07)"]
+        tmp["_Hp3_NUM"]   = tmp["Hp (3)"]
+
+        st.session_state.df_final_num = tmp[[
+            "_Hp10_NUM","_Hp007_NUM","_Hp3_NUM","PERIODO DE LECTURA","CLIENTE",
+            "CÓDIGO DE USUARIO","CÓDIGO DE DOSÍMETRO","NOMBRE","CÉDULA",
+            "TIPO DE DOSÍMETRO","FECHA DE LECTURA"
+        ]].copy()
+
+        return True, None  # OK, sin error
+    except Exception as e:
+        return False, f"Error leyendo Ninox: {e}"
+
 
 # ============== UI: Tabs ==============
 tab1, tab2 = st.tabs(["1) Cargar y Subir a Ninox", "2) Reporte Final (sumas)"])
@@ -1039,6 +1045,7 @@ with tab2:
                                data=excel_bytes,
                                file_name=f"{base}.xlsx",
                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
 
 
 
