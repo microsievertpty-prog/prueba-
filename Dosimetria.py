@@ -149,25 +149,55 @@ def ninox_insert(table_hint: str, rows: List[Dict[str, Any]], batch_size: int = 
     return {"ok": True, "inserted": inserted}
 
 @st.cache_data(ttl=300, show_spinner=False)
-def ninox_list_records(table_hint: str, page_size: int = 500):
+def ninox_list_records(table_hint: str, page_size: int = 128, max_pages: int = 500):
     """
-    Trae TODOS los registros paginando hasta que la API no devuelva más.
-    No asume que respete page_size (Ninox puede capar a 128).
+    Descarga todos los registros de Ninox de forma segura.
+    - Ninox suele capear 'limit' a 128. Usamos ese page_size por defecto.
+    - Avanza por 'skip' fijo y corta si:
+        * la página viene vacía, o
+        * la página trae < page_size, o
+        * detectamos que la API está repitiendo siempre la misma página (skip ignorado).
     """
     table_id = resolve_table_id(table_hint)
     url = f"{BASE_URL}/teams/{TEAM_ID}/databases/{DATABASE_ID}/tables/{table_id}/records"
 
     out: List[Dict[str, Any]] = []
     skip = 0
-    while True:
+    last_first_id = None  # para detectar repetición
+    seen_ids = set()
+
+    for _ in range(max_pages):
         params = {"limit": page_size, "skip": skip}
         r = requests.get(url, headers=ninox_headers(), params=params, timeout=60)
         r.raise_for_status()
         batch = r.json() or []
+
+        # fin duro: sin datos
         if not batch:
             break
-        out.extend(batch)
-        skip += len(batch)  # avanzar por lo realmente recibido
+
+        # detectar repetición de página (API ignora 'skip')
+        current_first_id = batch[0].get("id") if isinstance(batch[0], dict) else None
+        if current_first_id is not None and current_first_id == last_first_id:
+            # Estamos recibiendo la misma página una y otra vez -> cortamos
+            break
+        last_first_id = current_first_id
+
+        # evitar duplicados si el backend repite filas
+        for rec in batch:
+            rid = rec.get("id")
+            if rid is None or rid not in seen_ids:
+                out.append(rec)
+                if rid is not None:
+                    seen_ids.add(rid)
+
+        # si la página vino "incompleta", ya no hay más
+        if len(batch) < page_size:
+            break
+
+        # avanzar al siguiente bloque
+        skip += page_size
+
     return out
 
 def ninox_records_to_df(records: List[Dict[str,Any]]) -> pd.DataFrame:
@@ -1045,6 +1075,7 @@ with tab2:
                                data=excel_bytes,
                                file_name=f"{base}.xlsx",
                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
 
 
 
