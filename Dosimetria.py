@@ -10,18 +10,24 @@ import requests
 import streamlit as st
 from datetime import datetime
 
-# ============== NINOX CONFIG ==============
+# =========================================================
+# ============== NINOX CONFIG (ajusta si hace falta) ======
+# =========================================================
 API_TOKEN   = "edf312a0-98b8-11f0-883e-db77626d62e5"
 TEAM_ID     = "YrsYfTegptdZcHJEj"
 DATABASE_ID = "ow1geqnkz00e"
 BASE_URL    = "https://api.ninox.com/v1"
-TABLE_WRITE_NAME = "BASE DE DATOS"
+TABLE_WRITE_NAME = "BASE DE DATOS"   # puedes poner también el ID corto si lo conoces
 
-# ============== UI ==============
+# =========================================================
+# ============== UI =======================================
+# =========================================================
 st.set_page_config(page_title="Microsievert — Dosimetría", page_icon="🧪", layout="wide")
 st.title("🧪 Carga y Cruce de Dosis → Ninox (**BASE DE DATOS**)")
 
-# ============== Helpers ==============
+# =========================================================
+# ============== Helpers generales ========================
+# =========================================================
 def strip_accents(s: str) -> str:
     return "".join(c for c in unicodedata.normalize("NFD", s) if unicodedata.category(c) != "Mn")
 
@@ -37,7 +43,7 @@ def hp_to_num(x) -> float:
         return 0.0
 
 def pmfmt2(v, thr: float = 0.005) -> str:
-    """Formatea PERSONAS: <thr => 'PM', si no, 2 decimales."""
+    """Formatea PERSONAS: si < umbral => 'PM', si no, 2 decimales."""
     try:
         f = float(v)
     except Exception:
@@ -113,18 +119,24 @@ def periodo_to_date(s: str):
     except Exception:
         return pd.NaT
 
-# ============== Ninox helpers ==============
+# =========================================================
+# ============== Ninox helpers ============================
+# =========================================================
 def ninox_headers():
     return {"Authorization": f"Bearer {API_TOKEN}", "Content-Type": "application/json"}
 
 @st.cache_data(ttl=300, show_spinner=False)
 def ninox_list_tables(team_id: str, db_id: str):
     url = f"{BASE_URL}/teams/{team_id}/databases/{db_id}/tables"
-    r = requests.get(url, headers=ninox_headers(), timeout=30)
+    r = requests.get(url, headers=ninox_headers(), timeout=60)
     r.raise_for_status()
     return r.json()
 
 def resolve_table_id(table_hint: str) -> str:
+    """
+    Si el hint parece un ID corto (sin espacios y <= 8), usarlo.
+    Si no, buscar por nombre exacto entre las tablas del DB.
+    """
     hint = (table_hint or "").strip()
     if hint and " " not in hint and len(hint) <= 8:
         return hint
@@ -133,42 +145,41 @@ def resolve_table_id(table_hint: str) -> str:
             return str(t.get("id", "")).strip()
     return hint
 
-# (con caché) — la dejamos para usos ligeros si quieres
+def ninox_insert(table_hint: str, rows: List[Dict[str, Any]], batch_size: int = 300) -> Dict[str, Any]:
+    table_id = resolve_table_id(table_hint)
+    url = f"{BASE_URL}/teams/{TEAM_ID}/databases/{DATABASE_ID}/tables/{table_id}/records"
+    n, inserted = len(rows), 0
+    if n == 0:
+        return {"ok": True, "inserted": 0}
+    for i in range(0, n, batch_size):
+        chunk = rows[i:i+batch_size]
+        r = requests.post(url, headers=ninox_headers(), json=chunk, timeout=90)
+        if r.status_code != 200:
+            return {"ok": False, "inserted": inserted, "error": f"{r.status_code} {r.text}"}
+        inserted += len(chunk)
+    return {"ok": True, "inserted": inserted}
+
 @st.cache_data(ttl=300, show_spinner=False)
-def ninox_list_records(table_hint: str, limit: int = 1000, max_pages: int = 50):
+def ninox_list_records(table_hint: str, limit: int = 1000, max_pages: int = 20000) -> List[Dict[str,Any]]:
+    """
+    Paginación hasta agotar registros (sin límite práctico).
+    limit: tamaño de página (1..1000 típico).
+    max_pages: seguridad (muy alto por si hay muchos).
+    """
     table_id = resolve_table_id(table_hint)
     url = f"{BASE_URL}/teams/{TEAM_ID}/databases/{DATABASE_ID}/tables/{table_id}/records"
     out: List[Dict[str, Any]] = []; skip = 0
     for _ in range(max_pages):
         params = {"limit": limit, "skip": skip}
-        r = requests.get(url, headers=ninox_headers(), params=params, timeout=60)
+        r = requests.get(url, headers=ninox_headers(), params=params, timeout=90)
         r.raise_for_status()
         batch = r.json() or []
-        if not batch: break
-        out.extend(batch)
-        if len(batch) < limit: break
-        skip += limit
-    return out
-
-# === NUEVO: lectura SIN CACHÉ y sin límite práctico ===
-def ninox_fetch_all_records(table_hint: str, page_size: int = 200, max_pages: int = 10000, timeout: int = 20) -> List[Dict[str, Any]]:
-    table_id = resolve_table_id(table_hint)
-    url = f"{BASE_URL}/teams/{TEAM_ID}/databases/{DATABASE_ID}/tables/{table_id}/records"
-    out: List[Dict[str, Any]] = []
-    skip = 0
-    session = requests.Session()
-    for page in range(max_pages):
-        params = {"limit": page_size, "skip": skip}
-        try:
-            r = session.get(url, headers=ninox_headers(), params=params, timeout=timeout)
-            r.raise_for_status()
-        except requests.RequestException as e:
-            raise RuntimeError(f"Error leyendo Ninox (página {page+1}, skip={skip}): {e}")
-        batch = r.json() or []
-        out.extend(batch)
-        if len(batch) < page_size:
+        if not batch:
             break
-        skip += page_size
+        out.extend(batch)
+        if len(batch) < limit:
+            break
+        skip += limit
     return out
 
 def ninox_records_to_df(records: List[Dict[str,Any]]) -> pd.DataFrame:
@@ -194,7 +205,9 @@ def ninox_records_to_df(records: List[Dict[str,Any]]) -> pd.DataFrame:
         df["PERIODO DE LECTURA"] = df["PERIODO DE LECTURA"].astype(str).map(normalizar_periodo)
     return df
 
-# ============== Lectores archivos ==============
+# =========================================================
+# ============== Lectores archivos (lista y dosis) ========
+# =========================================================
 def norm_cols(df: pd.DataFrame) -> pd.DataFrame:
     def _n(x: str) -> str:
         x = strip_accents(str(x)).strip()
@@ -299,7 +312,9 @@ def leer_dosis(upload) -> Optional[pd.DataFrame]:
         df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
     return df
 
-# ============== Construcción de registros ==============
+# =========================================================
+# ============== Construcción de registros =================
+# =========================================================
 def construir_registros(df_lista: pd.DataFrame, df_dosis: pd.DataFrame, periodos: List[str]) -> pd.DataFrame:
     df_l = df_lista.copy()
     df_l["PERIODO DE LECTURA"] = df_l["PERIODO DE LECTURA"].astype(str).str.strip().str.upper()
@@ -350,7 +365,9 @@ def construir_registros(df_lista: pd.DataFrame, df_dosis: pd.DataFrame, periodos
         df_final = df_final.sort_values(["_IS_CONTROL","NOMBRE","CÉDULA"], ascending=[False, True, True]).reset_index(drop=True)
     return df_final
 
-# ============== Resta de CONTROL + Formato ==============
+# =========================================================
+# ============== Resta de CONTROL + Formato ===============
+# =========================================================
 def aplicar_resta_control_y_formato(
     df_final: pd.DataFrame,
     umbral_pm: float = 0.005,
@@ -380,7 +397,7 @@ def aplicar_resta_control_y_formato(
     df_ctrl = df[is_ctrl_mask].copy()
     df_per  = df[~is_ctrl_mask].copy()
 
-    # 3) Promedio CONTROL por PERIODO (para restar a PERSONAS)
+    # 3) Promedio CONTROL por PERIODO
     ctrl_means = pd.DataFrame(columns=["PERIODO DE LECTURA","Hp10_CTRL","Hp007_CTRL","Hp3_CTRL"])
     if not df_ctrl.empty:
         ctrl_means = (
@@ -440,15 +457,18 @@ def aplicar_resta_control_y_formato(
             ascending=[False, True, True]
         ).drop(columns=["__is_control__"], errors="ignore")
 
-    # 7) df_num: numéricos post-resta (solo personas) + metadatos
+    # 7) df_num: solo numéricos post-resta (para PERSONAS) + metadatos
     cols_keep = [
         "PERIODO DE LECTURA","CLIENTE","CÓDIGO DE USUARIO","CÓDIGO DE DOSÍMETRO",
         "NOMBRE","CÉDULA","TIPO DE DOSÍMETRO","FECHA DE LECTURA"
     ]
     df_num = out_per[["_Hp10_NUM","_Hp007_NUM","_Hp3_NUM"] + cols_keep].copy()
+
     return df_vista, df_num
 
-# ============== REPORTE ÚNICO (CONTROL primero) ==============
+# =========================================================
+# ============== Reporte (CONTROL primero) ================
+# =========================================================
 def construir_reporte_unico(df_vista: pd.DataFrame, df_num: pd.DataFrame, umbral_pm: float = 0.005, agrupar_control_por: str = "CLIENTE") -> pd.DataFrame:
     if df_vista is None or df_vista.empty or df_num is None or df_num.empty:
         return pd.DataFrame()
@@ -469,6 +489,7 @@ def construir_reporte_unico(df_vista: pd.DataFrame, df_num: pd.DataFrame, umbral
         per_view = per_anual.merge(per_last, on="CÓDIGO DE USUARIO", how="left")
         for c in safe_cols(per_view, ["Hp (10)","Hp (0.07)","Hp (3)","Hp (10) ANUAL","Hp (0.07) ANUAL","Hp (3) ANUAL"]):
             per_view[c] = per_view[c].map(lambda v: pmfmt2(v, umbral_pm))
+        # De por vida = anual (si luego tienes histórico real, cambia aquí)
         per_view["Hp (10) DE POR VIDA"]   = per_view["Hp (10) ANUAL"]
         per_view["Hp (0.07) DE POR VIDA"] = per_view["Hp (0.07) ANUAL"]
         per_view["Hp (3) DE POR VIDA"]    = per_view["Hp (3) ANUAL"]
@@ -515,6 +536,7 @@ def construir_reporte_unico(df_vista: pd.DataFrame, df_num: pd.DataFrame, umbral
             return cu if cu else str(row.get("CÓDIGO DE DOSÍMETRO","") or "").strip()
         ctrl_view["CÓDIGO DE USUARIO"] = ctrl_view.apply(_fill_usercode, axis=1)
 
+        # CONTROL SIEMPRE NÚMEROS
         for c in safe_cols(ctrl_view, ["Hp (10)","Hp (0.07)","Hp (3)",
                                        "Hp (10) ANUAL","Hp (0.07) ANUAL","Hp (3) ANUAL"]):
             ctrl_view[c] = ctrl_view[c].map(fmt_control_num)
@@ -541,7 +563,9 @@ def construir_reporte_unico(df_vista: pd.DataFrame, df_num: pd.DataFrame, umbral
         ).drop(columns=["__is_control__"])
     return reporte
 
-# ============== Excel con diseño (como el ejemplo) ==============
+# =========================================================
+# ============== Excel con diseño =========================
+# =========================================================
 from openpyxl import Workbook
 from openpyxl.styles import Font, Alignment, Border, Side, PatternFill
 from openpyxl.drawing.image import Image as XLImage
@@ -739,48 +763,131 @@ def build_excel_like_example(df_reporte: pd.DataFrame, fecha_emision: str, clien
 
     bio = BytesIO(); wb.save(bio); return bio.getvalue()
 
-# ====== Helper: recarga sin caché para TAB 2 (clientes) ======
-def _reload_from_ninox_fresh():
-    """Lee Ninox forzando refresh (sin cachear el payload grande) y actualiza session_state."""
+# =========================================================
+# ============== Helper: recarga TAB 2 ====================
+# =========================================================
+def _reload_from_ninox_fresh() -> Tuple[bool, Optional[str]]:
+    """
+    Lee Ninox forzando refresh de la caché y actualiza df_final_vista / df_final_num en session_state.
+    Evita loops de caché usando __wrapped__ para saltar cache_data.
+    """
     try:
         st.cache_data.clear()
     except Exception:
         pass
+    try:
+        # saltar caché:
+        recs = ninox_list_records.__wrapped__(TABLE_WRITE_NAME, limit=1000, max_pages=20000)  # type: ignore
+    except Exception:
+        # si __wrapped__ no existe, usar normal:
+        recs = ninox_list_records(TABLE_WRITE_NAME, limit=1000, max_pages=20000)
 
-    with st.status("Leyendo registros desde Ninox…", expanded=True) as status:
-        try:
-            status.update(label="Consultando API de Ninox…", state="running")
-            # TRAE TODO
-            recs = ninox_fetch_all_records(TABLE_WRITE_NAME, page_size=200, timeout=20)
-        except Exception as e:
-            status.update(label="Fallo leyendo Ninox", state="error")
-            return False, f"Fallo leyendo Ninox: {e}"
+    df_nx = ninox_records_to_df(recs)
+    if df_nx.empty:
+        return False, "No se recibieron registros desde Ninox."
 
-        df_nx = ninox_records_to_df(recs)
-        if df_nx.empty:
-            status.update(label="Sin datos en Ninox", state="warning")
-            return False, "No se recibieron registros desde Ninox."
+    st.session_state.df_final_vista = df_nx.copy()
+    tmp = df_nx.copy()
+    for h in ["Hp (10)","Hp (0.07)","Hp (3)"]:
+        tmp[h] = tmp[h].apply(hp_to_num)
+    tmp["_Hp10_NUM"]  = tmp["Hp (10)"]
+    tmp["_Hp007_NUM"] = tmp["Hp (0.07)"]
+    tmp["_Hp3_NUM"]   = tmp["Hp (3)"]
+    st.session_state.df_final_num = tmp[[
+        "_Hp10_NUM","_Hp007_NUM","_Hp3_NUM","PERIODO DE LECTURA","CLIENTE",
+        "CÓDIGO DE USUARIO","CÓDIGO DE DOSÍMETRO","NOMBRE","CÉDULA",
+        "TIPO DE DOSÍMETRO","FECHA DE LECTURA"
+    ]].copy()
+    return True, None
 
-        st.session_state.df_final_vista = df_nx.copy()
-        tmp = df_nx.copy()
-        for h in ["Hp (10)","Hp (0.07)","Hp (3)"]:
-            tmp[h] = tmp[h].apply(hp_to_num)
-        tmp["_Hp10_NUM"]  = tmp["Hp (10)"]
-        tmp["_Hp007_NUM"] = tmp["Hp (0.07)"]
-        tmp["_Hp3_NUM"]   = tmp["Hp (3)"]
-        st.session_state.df_final_num = tmp[[
-            "_Hp10_NUM","_Hp007_NUM","_Hp3_NUM","PERIODO DE LECTURA","CLIENTE",
-            "CÓDIGO DE USUARIO","CÓDIGO DE DOSÍMETRO","NOMBRE","CÉDULA",
-            "TIPO DE DOSÍMETRO","FECHA DE LECTURA"
-        ]].copy()
+# =========================================================
+# ============== Opción: subir export de Ninox =============
+# =========================================================
+def leer_ninox_export(upload) -> Optional[Tuple[pd.DataFrame, pd.DataFrame]]:
+    """
+    Lee un archivo exportado de Ninox (CSV/XLSX) con las columnas de la tabla 'BASE DE DATOS'
+    y devuelve:
+      - df_vista: tal cual (con PERIODO normalizado) para mostrar
+      - df_num:   numéricos Hp post-parseo para cálculos (sin formateo PM)
+    """
+    if not upload:
+        return None
 
-        status.update(label=f"Leídos {len(df_nx)} registro(s) de Ninox", state="complete")
-        return True, None
+    name = upload.name.lower()
+    # Leer
+    if name.endswith((".xlsx", ".xls")):
+        df = pd.read_excel(upload)
+    else:
+        raw = upload.read(); upload.seek(0)
+        good = None
+        for enc in ["utf-8-sig", "latin-1"]:
+            try:
+                good = pd.read_csv(BytesIO(raw), encoding=enc)
+                break
+            except Exception:
+                continue
+        if good is None:
+            raise RuntimeError("No se pudo leer el CSV exportado de Ninox.")
+        df = good
 
-# ============== UI: Tabs ==============
+    # Normalizar nombres mínimos
+    def _nn(x: str) -> str:
+        x = strip_accents(str(x)).strip()
+        x = re.sub(r"\s+", " ", x)
+        return x
+    df.columns = [_nn(c) for c in df.columns]
+
+    def _pick(df, opciones):
+        for o in opciones:
+            if o in df.columns: return o
+        return None
+
+    c_per  = _pick(df, ["PERIODO DE LECTURA","PERIODO"])
+    c_cli  = _pick(df, ["CLIENTE"])
+    c_cod  = _pick(df, ["CÓDIGO DE DOSÍMETRO","CODIGO DE DOSIMETRO","CODIGO DOSIMETRO"])
+    c_usr  = _pick(df, ["CÓDIGO DE USUARIO","CODIGO DE USUARIO"])
+    c_nom  = _pick(df, ["NOMBRE"])
+    c_ced  = _pick(df, ["CÉDULA","CEDULA"])
+    c_fec  = _pick(df, ["FECHA DE LECTURA","FECHA"])
+    c_tip  = _pick(df, ["TIPO DE DOSÍMETRO","TIPO DE DOSIMETRO"])
+    c_h10  = _pick(df, ["HP (10)","HP(10)","HP 10","Hp (10)"])
+    c_h07  = _pick(df, ["HP (0.07)","HP(0.07)","HP 0.07","HP (0,07)","HP(0,07)","Hp (0.07)"])
+    c_h3   = _pick(df, ["HP (3)","HP(3)","HP 3","Hp (3)"])
+
+    out = pd.DataFrame()
+    out["PERIODO DE LECTURA"] = df[c_per].astype(str).map(normalizar_periodo) if c_per else ""
+    out["CLIENTE"]            = df[c_cli].astype(str) if c_cli else ""
+    out["CÓDIGO DE DOSÍMETRO"]= df[c_cod].astype(str).str.upper() if c_cod else ""
+    out["CÓDIGO DE USUARIO"]  = df[c_usr].astype(str) if c_usr else ""
+    out["NOMBRE"]             = df[c_nom].astype(str) if c_nom else ""
+    out["CÉDULA"]             = df[c_ced].astype(str) if c_ced else ""
+    out["FECHA DE LECTURA"]   = df[c_fec].astype(str) if c_fec else ""
+    out["TIPO DE DOSÍMETRO"]  = df[c_tip].astype(str) if c_tip else ""
+    out["Hp (10)"]            = df[c_h10] if c_h10 else 0.0
+    out["Hp (0.07)"]          = df[c_h07] if c_h07 else 0.0
+    out["Hp (3)"]             = df[c_h3]  if c_h3  else 0.0
+
+    df_vista = out.copy()
+    tmp = out.copy()
+    for h in ["Hp (10)","Hp (0.07)","Hp (3)"]:
+        tmp[h] = tmp[h].apply(hp_to_num)
+    tmp["_Hp10_NUM"]  = tmp["Hp (10)"]
+    tmp["_Hp007_NUM"] = tmp["Hp (0.07)"]
+    tmp["_Hp3_NUM"]   = tmp["Hp (3)"]
+
+    df_num = tmp[[
+        "_Hp10_NUM","_Hp007_NUM","_Hp3_NUM","PERIODO DE LECTURA","CLIENTE",
+        "CÓDIGO DE USUARIO","CÓDIGO DE DOSÍMETRO","NOMBRE","CÉDULA",
+        "TIPO DE DOSÍMETRO","FECHA DE LECTURA"
+    ]].copy()
+    return df_vista, df_num
+
+# =========================================================
+# ============== UI: Tabs =================================
+# =========================================================
 tab1, tab2 = st.tabs(["1) Cargar y Subir a Ninox", "2) Reporte Final (sumas)"])
 
-# -------- TAB 1
+# ---------------- TAB 1 ----------------------------------
 with tab1:
     st.subheader("1) Cargar LISTA DE CÓDIGO")
     upl_lista = st.file_uploader("Sube la LISTA DE CÓDIGO (CSV / XLS / XLSX)", type=["csv","xls","xlsx"], key="upl_lista")
@@ -818,8 +925,11 @@ with tab1:
 
     def _fetch_existing_keys_fresh() -> set:
         """SIN caché: lee de Ninox y construye set de llaves existentes."""
-        recs = ninox_fetch_all_records(TABLE_WRITE_NAME, page_size=200, timeout=20)
-        df = ninox_records_to_df(recs)
+        try:
+            existing_recs = ninox_list_records.__wrapped__(TABLE_WRITE_NAME, limit=1000, max_pages=20000)  # type: ignore
+        except Exception:
+            existing_recs = ninox_list_records(TABLE_WRITE_NAME, limit=1000, max_pages=20000)
+        df = ninox_records_to_df(existing_recs)
         if df.empty:
             return set()
         keys = set()
@@ -866,7 +976,7 @@ with tab1:
     def _hp_value_for_upload(v, as_text_pm=True, is_control=False):
         """
         - Personas: si es 'PM' -> 'PM' (cuando as_text_pm=True), o None si as_text_pm=False.
-        - CONTROL: nunca 'PM'; si viene 'PM' lo convertimos a 0.00 (num o string según as_text_pm).
+        - CONTROL: nunca 'PM'; si viene 'PM' lo convertimos a 0.00 (subir como número o string según as_text_pm).
         """
         sv = None if v is None else str(v).strip().upper()
         if is_control:
@@ -966,31 +1076,47 @@ with tab1:
                 else:
                     st.error(f"❌ Error al subir: {res.get('error')}")
 
-# -------- TAB 2
+# ---------------- TAB 2 ----------------------------------
 with tab2:
     st.subheader("📊 Reporte Final (CONTROL primero y luego PERSONAS)")
+
     fuente = st.radio("Fuente de datos para el reporte:", [
         "Usar datos procesados en esta sesión",
         "Leer directamente de Ninox (tabla BASE DE DATOS)",
+        "Subir archivo exportado de Ninox (CSV/XLSX)",
     ], index=0)
 
+    # Botones/acciones por fuente
     if fuente == "Leer directamente de Ninox (tabla BASE DE DATOS)":
-        if st.button("🔄 Actualizar CLIENTES (leer Ninox de nuevo)"):
-            ok, err = _reload_from_ninox_fresh()
-            if ok:
-                st.success("Clientes actualizados desde Ninox.")
-            else:
-                st.warning(err or "No fue posible refrescar desde Ninox.")
+        colA, colB = st.columns([1,1])
+        with colA:
+            if st.button("🔄 Actualizar CLIENTES (leer Ninox de nuevo)"):
+                ok, err = _reload_from_ninox_fresh()
+                if ok:
+                    st.success("Clientes/datos actualizados desde Ninox.")
+                else:
+                    st.warning(err or "No fue posible refrescar desde Ninox.")
+        with colB:
+            st.caption("La lectura usa paginación sin límite (hasta agotar registros).")
+
+        # Carga inicial si no hay datos
         if "df_final_vista" not in st.session_state or st.session_state.df_final_vista is None:
             ok, err = _reload_from_ninox_fresh()
             if not ok:
                 st.warning(err or "No se recibieron registros desde Ninox.")
-    else:
-        if st.button("🔁 Recalcular CLIENTES (desde esta sesión)"):
-            if "df_final_vista" in st.session_state and isinstance(st.session_state.df_final_vista, pd.DataFrame) and not st.session_state.df_final_vista.empty:
-                st.success("Clientes recalculados a partir de los datos procesados.")
+
+    elif fuente == "Subir archivo exportado de Ninox (CSV/XLSX)":
+        upl_export = st.file_uploader("Sube el export de Ninox (p.ej. 'BASE DE DATOS - (all).csv' o .xlsx)",
+                                      type=["csv","xls","xlsx"], key="upl_export_ninox")
+        if upl_export is not None:
+            parsed = leer_ninox_export(upl_export)
+            if not parsed:
+                st.error("No se pudo leer el archivo. Verifica que sea el export de la tabla 'BASE DE DATOS'.")
             else:
-                st.info("Primero procesa datos en el TAB 1.")
+                df_vista_u, df_num_u = parsed
+                st.session_state.df_final_vista = df_vista_u
+                st.session_state.df_final_num   = df_num_u
+                st.success(f"Archivo cargado: {len(df_vista_u)} registro(s).")
 
     # Nombre de archivo deseado
     nombre_archivo_base = st.text_input("Nombre de archivo para las descargas (sin extensión)", value="Reporte_Final")
@@ -1000,19 +1126,14 @@ with tab2:
     fecha_emision_ui = st.date_input("Fecha de emisión", value=pd.Timestamp.today()).strftime("%d/%m/%Y")
     logo_file = st.file_uploader("Logo opcional (PNG/JPG)", type=["png","jpg","jpeg"], key="logo_excel")
 
-    # Si eligieron leer de Ninox y no hay datos cargados aún, intenta cargar
-    if fuente == "Leer directamente de Ninox (tabla BASE DE DATOS)":
-        if "df_final_vista" not in st.session_state or st.session_state.df_final_vista is None:
-            ok, err = _reload_from_ninox_fresh()
-            if not ok:
-                st.warning(err or "No se recibieron registros desde Ninox.")
-
+    # Datos actuales en memoria
     df_vista = st.session_state.get("df_final_vista")
     df_num   = st.session_state.get("df_final_num")
+
     if df_vista is None or df_vista.empty or df_num is None or df_num.empty:
         st.info("No hay datos para mostrar en el reporte final.")
     else:
-        # Filtro por CLIENTE
+        # Filtros
         clientes = sorted([c for c in df_vista["CLIENTE"].dropna().unique().tolist() if str(c).strip()])
         cliente_filtro = None
         if clientes:
@@ -1022,13 +1143,15 @@ with tab2:
                 df_vista = df_vista[df_vista["CLIENTE"] == cliente_filtro].copy()
                 df_num   = df_num[df_num["CLIENTE"] == cliente_filtro].copy()
 
-        # Filtro por PERIODO
+        # Filtro por PERIODO (mes)
         periodos_all = sorted(df_vista["PERIODO DE LECTURA"].dropna().astype(str).unique().tolist())
-        periodos_filtro = st.multiselect("Filtrar por PERIODO DE LECTURA (opcional, vacío = TODOS)", periodos_all, default=[])
-        if periodos_filtro:
-            df_vista = df_vista[df_vista["PERIODO DE LECTURA"].isin(periodos_filtro)].copy()
-            df_num   = df_num[df_num["PERIODO DE LECTURA"].isin(periodos_filtro)].copy()
+        if periodos_all:
+            periodo_sel = st.selectbox("Filtrar por PERIODO DE LECTURA (opcional)", ["(Todos)"] + periodos_all, index=0)
+            if periodo_sel != "(Todos)":
+                df_vista = df_vista[df_vista["PERIODO DE LECTURA"] == periodo_sel].copy()
+                df_num   = df_num[df_num["PERIODO DE LECTURA"] == periodo_sel].copy()
 
+        # Construir y mostrar reporte
         reporte = construir_reporte_unico(df_vista, df_num, umbral_pm=0.005, agrupar_control_por="CLIENTE")
         if reporte.empty:
             st.info("No hay datos para el reporte con el/los filtro(s) aplicado(s).")
@@ -1051,5 +1174,3 @@ with tab2:
                                data=excel_bytes,
                                file_name=f"{base}.xlsx",
                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-
-
