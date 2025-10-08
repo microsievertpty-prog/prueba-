@@ -118,21 +118,31 @@ def ninox_headers():
     return {"Authorization": f"Bearer {API_TOKEN}", "Content-Type": "application/json"}
 
 @st.cache_data(ttl=300, show_spinner=False)
-def ninox_list_tables(team_id: str, db_id: str):
-    url = f"{BASE_URL}/teams/{team_id}/databases/{db_id}/tables"
-    r = requests.get(url, headers=ninox_headers(), timeout=30)
-    r.raise_for_status()
-    return r.json()
+def ninox_list_records(table_hint: str, page_size: int = 500):
+    """
+    Descarga TODOS los registros de la tabla sin límite práctico de páginas.
+    - Sigue pidiendo páginas hasta que la API devuelva una lista vacía.
+    - Avanza 'skip' por la cantidad realmente recibida (la API puede capar el page_size).
+    """
+    table_id = resolve_table_id(table_hint)
+    url = f"{BASE_URL}/teams/{TEAM_ID}/databases/{DATABASE_ID}/tables/{table_id}/records"
 
-def resolve_table_id(table_hint: str) -> str:
-    hint = (table_hint or "").strip()
-    # Python usa 'and', no '&&'
-    if hint and " " not in hint and len(hint) <= 8:
-        return hint
-    for t in ninox_list_tables(TEAM_ID, DATABASE_ID):
-        if str(t.get("name", "")).strip().lower() == hint.lower():
-            return str(t.get("id", "")).strip()
-    return hint
+    out: List[Dict[str, Any]] = []
+    skip = 0
+
+    while True:
+        params = {"limit": page_size, "skip": skip}
+        r = requests.get(url, headers=ninox_headers(), params=params, timeout=60)
+        r.raise_for_status()
+        batch = r.json() or []
+
+        if not batch:
+            break  # no hay más páginas
+
+        out.extend(batch)
+        skip += len(batch)  # avanzar por lo que realmente llegó (no por el page_size)
+
+    return out
 
 def ninox_insert(table_hint: str, rows: List[Dict[str, Any]], batch_size: int = 300) -> Dict[str, Any]:
     table_id = resolve_table_id(table_hint)
@@ -743,7 +753,7 @@ def _reload_from_ninox_fresh():
         st.cache_data.clear()
     except Exception:
         pass
-    recs = ninox_list_records(TABLE_WRITE_NAME, limit=1000)
+    recs = ninox_list_records(TABLE_WRITE_NAME) 
     df_nx = ninox_records_to_df(recs)
     if df_nx.empty:
         return False, "No se recibieron registros desde Ninox."
@@ -1029,6 +1039,14 @@ with tab2:
                                data=excel_bytes,
                                file_name=f"{base}.xlsx",
                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+
+
+
+
+
+
+
 
 
 
