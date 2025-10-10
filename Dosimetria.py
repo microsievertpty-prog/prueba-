@@ -1340,7 +1340,7 @@ with tab2:
     if df_vista is None or df_vista.empty or df_num is None or df_num.empty:
         st.info("No hay datos para mostrar en el reporte final.")
     else:
-        # ========= Clave: conservar copia GLOBAL antes de filtrar para ANUAL/VIDA =========
+        # ========= Clave: conservar copia GLOBAL antes de filtrar para ANUAL/VIDA y MAESTRO =========
         df_num_global = df_num.copy()
 
         # ---------- Filtro de CLIENTE (opcional) ----------
@@ -1353,7 +1353,10 @@ with tab2:
                 df_vista = df_vista[df_vista["CLIENTE"] == cliente_filtro].copy()
                 df_num   = df_num[df_num["CLIENTE"] == cliente_filtro].copy()
 
-        # ---------- Selección manual de PERIODO (default = último detectado) ----------
+        # ---------- Opciones de períodos disponibles ----------
+        periodos_opts = sorted(df_vista["PERIODO DE LECTURA"].dropna().astype(str).unique().tolist())
+
+        # Detectar último período (para la barra automática)
         ultimo_periodo = None
         if "PERIODO DE LECTURA" in df_vista.columns:
             fechas = df_vista["PERIODO DE LECTURA"].dropna().astype(str).map(periodo_to_date)
@@ -1361,33 +1364,63 @@ with tab2:
             if not fechas.empty:
                 ultimo_periodo = fechas.max()
 
-        periodos_opts = sorted(df_vista["PERIODO DE LECTURA"].dropna().astype(str).unique().tolist())
-        default_idx = 0
+        meses_es = {1:"ENERO",2:"FEBRERO",3:"MARZO",4:"ABRIL",5:"MAYO",6:"JUNIO",7:"JULIO",8:"AGOSTO",9:"SEPTIEMBRE",10:"OCTUBRE",11:"NOVIEMBRE",12:"DICIEMBRE"}
+        periodo_auto = None
         if ultimo_periodo is not None:
-            meses_es = {1:"ENERO",2:"FEBRERO",3:"MARZO",4:"ABRIL",5:"MAYO",6:"JUNIO",7:"JULIO",8:"AGOSTO",9:"SEPTIEMBRE",10:"OCTUBRE",11:"NOVIEMBRE",12:"DICIEMBRE"}
-            periodo_str = f"{meses_es[ultimo_periodo.month]} {ultimo_periodo.year}"
-            if periodo_str in periodos_opts:
-                default_idx = periodos_opts.index(periodo_str)
+            periodo_auto = f"{meses_es[ultimo_periodo.month]} {ultimo_periodo.year}"
 
-        if periodos_opts:
-            periodo_sel = st.selectbox("Selecciona el PERIODO DE LECTURA:", periodos_opts, index=default_idx)
-            df_vista = df_vista[df_vista["PERIODO DE LECTURA"].str.upper() == periodo_sel.upper()]
-            df_num   = df_num[df_num["PERIODO DE LECTURA"].str.upper() == periodo_sel.upper()]
+        # ---------- MODO: Automático o Manual (ambas barras visibles) ----------
+        modo_periodo = st.radio("Modo de período a aplicar:", ["Automático (último detectado)", "Manual"], index=0, horizontal=True)
+
+        # Barra Automática (muestra el último; si no hay, muestra vacío)
+        col1, col2 = st.columns(2)
+        with col1:
+            if periodos_opts:
+                idx_auto = periodos_opts.index(periodo_auto) if (periodo_auto in periodos_opts) else 0
+                periodo_auto_sel = st.selectbox("Período (automático - último detectado)", periodos_opts, index=idx_auto, key="periodo_auto_sel")
+                # Nota: aunque el usuario cambie aquí, el valor aplicado será el detectado (periodo_auto),
+                # para mantener la lógica de "automático". Si quieres permitir que se sincronice, usa periodo_auto_sel.
+            else:
+                periodo_auto_sel = None
+                st.warning("No hay períodos disponibles para la barra automática.")
+
+        # Barra Manual (siempre visible)
+        with col2:
+            if periodos_opts:
+                idx_default = periodos_opts.index(periodo_auto) if (periodo_auto in periodos_opts) else 0
+                periodo_manual_sel = st.selectbox("Período (manual - selecciona uno)", periodos_opts, index=idx_default, key="periodo_manual_sel")
+            else:
+                periodo_manual_sel = None
+                st.warning("No hay períodos disponibles para la barra manual.")
+
+        # Decidir cuál período usar según el modo
+        if modo_periodo.startswith("Automático"):
+            periodo_usado = (periodo_auto or periodo_auto_sel)
+            st.caption(f"🧠 Usando período AUTOMÁTICO: **{periodo_usado or '(no detectado)'}**")
         else:
-            st.warning("No hay períodos disponibles en los datos filtrados.")
+            periodo_usado = periodo_manual_sel
+            st.caption(f"🖐️ Usando período MANUAL: **{periodo_usado or '(no seleccionado)'}**")
+
+        # ---------- Aplicar filtro por período elegido ----------
+        if periodo_usado and periodos_opts:
+            df_vista = df_vista[df_vista["PERIODO DE LECTURA"].astype(str).str.upper() == str(periodo_usado).upper()]
+            df_num   = df_num[df_num["PERIODO DE LECTURA"].astype(str).str.upper() == str(periodo_usado).upper()]
+        else:
+            st.warning("No hay período válido seleccionado/detectado.")
             df_vista = df_vista.iloc[0:0]
             df_num   = df_num.iloc[0:0]
 
         # ---------- Construir reporte ----------
         reporte = construir_reporte_unico(df_vista, df_num, umbral_pm=0.005, agrupar_control_por="CLIENTE")
         if reporte.empty:
-            st.info("No hay datos para el reporte con el período seleccionado.")
+            st.info("No hay datos para el reporte con el período aplicado.")
         else:
-            # Rellenar con maestro global (nombre/cedula) y recalcular anual/vida por código
+            # Rellenar NOMBRE/CÉDULA por maestro global y recalcular ANUAL/VIDA global por CÓDIGO
             maestro = construir_maestro_usuarios(df_num_global)
             reporte = aplicar_maestro_a_reporte(reporte, maestro)
             reporte = recalcular_anuales_globales_por_codigo(reporte, df_num_global, umbral_pm=0.005)
 
+            # (Opcional) conflictos de identidad por código
             with st.expander("⚠️ Conflictos de identidad por código (si los hay)"):
                 conf = detectar_conflictos_identidad(df_num_global)
                 if conf.empty:
@@ -1397,7 +1430,7 @@ with tab2:
 
             st.dataframe(reporte, use_container_width=True)
 
-            # Descargas
+            # ---------- Descargas ----------
             base = re.sub(r"[^A-Za-z0-9_\- ]+", "_", nombre_archivo_base.strip()) or "Reporte_Final"
             csv_bytes = reporte.to_csv(index=False).encode("utf-8-sig")
             st.download_button("⬇️ Descargar CSV (tabla)", data=csv_bytes, file_name=f"{base}.csv", mime="text/csv")
@@ -1413,7 +1446,6 @@ with tab2:
                                data=excel_bytes,
                                file_name=f"{base}.xlsx",
                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-
 
 
 
