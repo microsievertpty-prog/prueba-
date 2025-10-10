@@ -1287,6 +1287,7 @@ with tab1:
                     st.error(f"❌ Error al subir: {res.get('error')}")
 
 # -------- TAB 2
+# -------- TAB 2
 with tab2:
     st.subheader("📊 Reporte Final (CONTROL primero y luego PERSONAS)")
 
@@ -1339,9 +1340,10 @@ with tab2:
     if df_vista is None or df_vista.empty or df_num is None or df_num.empty:
         st.info("No hay datos para mostrar en el reporte final.")
     else:
-        # ========= CLAVE: conservar una copia GLOBAL antes de filtrar por cliente/periodos =========
-        df_num_global = df_num.copy()  # <-- global para ANUAL/VIDA y maestro
+        # ========= Clave: conservar copia GLOBAL antes de filtrar para ANUAL/VIDA =========
+        df_num_global = df_num.copy()
 
+        # ---------- Filtro de CLIENTE (opcional) ----------
         clientes = sorted([c for c in df_vista["CLIENTE"].dropna().unique().tolist() if str(c).strip()])
         cliente_filtro = None
         if clientes:
@@ -1351,13 +1353,7 @@ with tab2:
                 df_vista = df_vista[df_vista["CLIENTE"] == cliente_filtro].copy()
                 df_num   = df_num[df_num["CLIENTE"] == cliente_filtro].copy()
 
-        # ======= NUEVO: elegir modo de período =======
-        modo_reporte = st.radio(
-            "Modo de selección de período:",
-            ["Elegir manualmente", "Usar último mes automáticamente"],
-            index=0
-        )
-
+        # ---------- Selección manual de PERIODO (default = último detectado) ----------
         ultimo_periodo = None
         if "PERIODO DE LECTURA" in df_vista.columns:
             fechas = df_vista["PERIODO DE LECTURA"].dropna().astype(str).map(periodo_to_date)
@@ -1365,33 +1361,33 @@ with tab2:
             if not fechas.empty:
                 ultimo_periodo = fechas.max()
 
-        if modo_reporte == "Elegir manualmente":
-            periodos_opts = sorted(df_vista["PERIODO DE LECTURA"].dropna().astype(str).unique().tolist())
-            periodos_sel  = st.multiselect("Filtrar por PERIODO(S) a incluir (vacío = todos)", periodos_opts, default=[])
-            if periodos_sel:
-                sel = set([str(p).strip().upper() for p in periodos_sel])
-                df_vista["__PERIODO__"] = df_vista["PERIODO DE LECTURA"].astype(str).str.upper()
-                df_num["__PERIODO__"]   = df_num["PERIODO DE LECTURA"].astype(str).str.upper()
-                df_vista = df_vista[df_vista["__PERIODO__"].isin(sel)].drop(columns=["__PERIODO__"], errors="ignore")
-                df_num   = df_num[df_num["__PERIODO__"].isin(sel)].drop(columns=["__PERIODO__"], errors="ignore")
-        elif modo_reporte == "Usar último mes automáticamente" and ultimo_periodo is not None:
-            periodo_str = f"{ultimo_periodo.strftime('%B').upper()} {ultimo_periodo.year}"
-            st.info(f"Usando último período detectado: **{periodo_str}**")
-            df_vista["__PERIODO__"] = df_vista["PERIODO DE LECTURA"].astype(str).str.upper()
-            df_num["__PERIODO__"]   = df_num["PERIODO DE LECTURA"].astype(str).str.upper()
-            df_vista = df_vista[df_vista["__PERIODO__"] == periodo_str.upper()].drop(columns=["__PERIODO__"], errors="ignore")
-            df_num   = df_num[df_num["__PERIODO__"] == periodo_str.upper()].drop(columns=["__PERIODO__"], errors="ignore")
+        periodos_opts = sorted(df_vista["PERIODO DE LECTURA"].dropna().astype(str).unique().tolist())
+        default_idx = 0
+        if ultimo_periodo is not None:
+            meses_es = {1:"ENERO",2:"FEBRERO",3:"MARZO",4:"ABRIL",5:"MAYO",6:"JUNIO",7:"JULIO",8:"AGOSTO",9:"SEPTIEMBRE",10:"OCTUBRE",11:"NOVIEMBRE",12:"DICIEMBRE"}
+            periodo_str = f"{meses_es[ultimo_periodo.month]} {ultimo_periodo.year}"
+            if periodo_str in periodos_opts:
+                default_idx = periodos_opts.index(periodo_str)
 
-        # Construir reporte y aplicar maestro + anual/vida global
+        if periodos_opts:
+            periodo_sel = st.selectbox("Selecciona el PERIODO DE LECTURA:", periodos_opts, index=default_idx)
+            df_vista = df_vista[df_vista["PERIODO DE LECTURA"].str.upper() == periodo_sel.upper()]
+            df_num   = df_num[df_num["PERIODO DE LECTURA"].str.upper() == periodo_sel.upper()]
+        else:
+            st.warning("No hay períodos disponibles en los datos filtrados.")
+            df_vista = df_vista.iloc[0:0]
+            df_num   = df_num.iloc[0:0]
+
+        # ---------- Construir reporte ----------
         reporte = construir_reporte_unico(df_vista, df_num, umbral_pm=0.005, agrupar_control_por="CLIENTE")
         if reporte.empty:
-            st.info("No hay datos para el reporte con el filtro aplicado.")
+            st.info("No hay datos para el reporte con el período seleccionado.")
         else:
+            # Rellenar con maestro global (nombre/cedula) y recalcular anual/vida por código
             maestro = construir_maestro_usuarios(df_num_global)
             reporte = aplicar_maestro_a_reporte(reporte, maestro)
             reporte = recalcular_anuales_globales_por_codigo(reporte, df_num_global, umbral_pm=0.005)
 
-            # (Opcional) mostrar conflictos de identidad por código
             with st.expander("⚠️ Conflictos de identidad por código (si los hay)"):
                 conf = detectar_conflictos_identidad(df_num_global)
                 if conf.empty:
@@ -1401,6 +1397,7 @@ with tab2:
 
             st.dataframe(reporte, use_container_width=True)
 
+            # Descargas
             base = re.sub(r"[^A-Za-z0-9_\- ]+", "_", nombre_archivo_base.strip()) or "Reporte_Final"
             csv_bytes = reporte.to_csv(index=False).encode("utf-8-sig")
             st.download_button("⬇️ Descargar CSV (tabla)", data=csv_bytes, file_name=f"{base}.csv", mime="text/csv")
@@ -1416,6 +1413,8 @@ with tab2:
                                data=excel_bytes,
                                file_name=f"{base}.xlsx",
                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+
 
 
 
