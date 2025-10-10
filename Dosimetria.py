@@ -160,7 +160,7 @@ def ninox_insert(table_hint: str, rows: List[Dict[str, Any]], batch_size: int = 
 @st.cache_data(ttl=300, show_spinner=False)
 def ninox_list_records(table_hint: str, limit: int = 1000, max_pages: int = 50):
     table_id = resolve_table_id(table_hint)
-    url = f"{BASE_URL}/teams/{TEAM_ID}/databases/{DATABASE_ID}/tables/{table_id}/records"}
+    url = f"{BASE_URL}/teams/{TEAM_ID}/databases/{DATABASE_ID}/tables/{table_id}/records"
     out: List[Dict[str, Any]] = []; skip = 0
     for _ in range(max_pages):
         params = {"limit": limit, "skip": skip}
@@ -1379,6 +1379,7 @@ with tab2:
                                data=excel_bytes,
                                file_name=f"{base}.xlsx",
                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
 
 
 
