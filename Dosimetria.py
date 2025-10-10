@@ -1340,9 +1340,6 @@ with tab2:
     if df_vista is None or df_vista.empty or df_num is None or df_num.empty:
         st.info("No hay datos para mostrar en el reporte final.")
     else:
-        # ========= CLAVE: conservar una copia GLOBAL antes de filtrar por cliente/periodos =========
-        df_num_global = df_num.copy()  # <-- se usará para ANUAL/VIDA global y maestro de NOMBRE/CÉDULA
-
         clientes = sorted([c for c in df_vista["CLIENTE"].dropna().unique().tolist() if str(c).strip()])
         cliente_filtro = None
         if clientes:
@@ -1354,37 +1351,6 @@ with tab2:
 
         periodos_opts = sorted(df_vista["PERIODO DE LECTURA"].dropna().astype(str).unique().tolist())
         periodos_sel  = st.multiselect("Filtrar por PERIODO(S) a incluir (vacío = todos)", periodos_opts, default=[])
-
-        # ====== NUEVO: barra para escoger automáticamente el último mes ======
-        with st.container():
-            st.markdown("#### 🗓️ Selección rápida de período")
-            usar_ultimo = st.checkbox("Usar automáticamente el **último período disponible**", value=False)
-
-            # Detectar último período a partir de 'PERIODO DE LECTURA'
-            periodo_auto = None
-            try:
-                fechas_detect = df_vista["PERIODO DE LECTURA"].dropna().astype(str).map(periodo_to_date)
-                fechas_detect = fechas_detect.dropna()
-                if not fechas_detect.empty:
-                    ultimo_ts = fechas_detect.max()
-                    _meses = {1:"ENERO",2:"FEBRERO",3:"MARZO",4:"ABRIL",5:"MAYO",6:"JUNIO",
-                              7:"JULIO",8:"AGOSTO",9:"SEPTIEMBRE",10:"OCTUBRE",11:"NOVIEMBRE",12:"DICIEMBRE"}
-                    periodo_auto = f"{_meses.get(ultimo_ts.month, '')} {ultimo_ts.year}"
-            except Exception:
-                periodo_auto = None
-
-            # Mostrar el último período detectado (solo informativo)
-            if periodo_auto:
-                st.text_input("Último período detectado", value=periodo_auto, disabled=True)
-            else:
-                st.caption("No se pudo detectar automáticamente un período válido.")
-
-            # Si el usuario activa el modo automático y existe período detectado,
-            # forzamos periodos_sel para que tu lógica actual lo use sin cambios.
-            if usar_ultimo and periodo_auto:
-                periodos_sel = [periodo_auto]
-        # ====== FIN NUEVO ======
-
         if periodos_sel:
             sel = set([str(p).strip().upper() for p in periodos_sel])
             df_vista["__PERIODO__"] = df_vista["PERIODO DE LECTURA"].astype(str).str.upper()
@@ -1396,19 +1362,6 @@ with tab2:
         if reporte.empty:
             st.info("No hay datos para el reporte con el filtro aplicado.")
         else:
-            # ========= NUEVO: recalcular ANUAL/VIDA por CÓDIGO global y rellenar NOMBRE/CÉDULA por maestro =========
-            maestro = construir_maestro_usuarios(df_num_global)
-            reporte = aplicar_maestro_a_reporte(reporte, maestro)
-            reporte = recalcular_anuales_globales_por_codigo(reporte, df_num_global, umbral_pm=0.005)
-
-            # (Opcional) mostrar conflictos de identidad por código
-            with st.expander("⚠️ Conflictos de identidad por código (si los hay)"):
-                conf = detectar_conflictos_identidad(df_num_global)
-                if conf.empty:
-                    st.caption("Sin conflictos detectados.")
-                else:
-                    st.dataframe(conf, use_container_width=True)
-
             st.dataframe(reporte, use_container_width=True)
 
             base = re.sub(r"[^A-Za-z0-9_\- ]+", "_", nombre_archivo_base.strip()) or "Reporte_Final"
@@ -1426,6 +1379,10 @@ with tab2:
                                data=excel_bytes,
                                file_name=f"{base}.xlsx",
                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+
+
+
 
 
 
