@@ -1082,7 +1082,6 @@ def recalcular_anuales_globales_por_codigo(df_reporte: pd.DataFrame, df_num_glob
     for c in ["Hp (10) ANUAL","Hp (0.07) ANUAL","Hp (3) ANUAL","Hp (10) DE POR VIDA","Hp (0.07) DE POR VIDA","Hp (3) DE POR VIDA"]:
         cg = f"{c}_G"
         if cg in out.columns:
-            # mostrar como PM si corresponde (coherente con pmfmt2)
             out[c] = out[cg].map(lambda v: pmfmt2(v, umbral_pm))
             out.drop(columns=[cg], inplace=True, errors="ignore")
     return out
@@ -1341,7 +1340,7 @@ with tab2:
         st.info("No hay datos para mostrar en el reporte final.")
     else:
         # ========= CLAVE: conservar una copia GLOBAL antes de filtrar por cliente/periodos =========
-        df_num_global = df_num.copy()  # <-- se usará para ANUAL/VIDA global y maestro de NOMBRE/CÉDULA
+        df_num_global = df_num.copy()  # <-- global para ANUAL/VIDA y maestro
 
         clientes = sorted([c for c in df_vista["CLIENTE"].dropna().unique().tolist() if str(c).strip()])
         cliente_filtro = None
@@ -1352,20 +1351,42 @@ with tab2:
                 df_vista = df_vista[df_vista["CLIENTE"] == cliente_filtro].copy()
                 df_num   = df_num[df_num["CLIENTE"] == cliente_filtro].copy()
 
-        periodos_opts = sorted(df_vista["PERIODO DE LECTURA"].dropna().astype(str).unique().tolist())
-        periodos_sel  = st.multiselect("Filtrar por PERIODO(S) a incluir (vacío = todos)", periodos_opts, default=[])
-        if periodos_sel:
-            sel = set([str(p).strip().upper() for p in periodos_sel])
+        # ======= NUEVO: elegir modo de período =======
+        modo_reporte = st.radio(
+            "Modo de selección de período:",
+            ["Elegir manualmente", "Usar último mes automáticamente"],
+            index=0
+        )
+
+        ultimo_periodo = None
+        if "PERIODO DE LECTURA" in df_vista.columns:
+            fechas = df_vista["PERIODO DE LECTURA"].dropna().astype(str).map(periodo_to_date)
+            fechas = fechas.dropna().sort_values()
+            if not fechas.empty:
+                ultimo_periodo = fechas.max()
+
+        if modo_reporte == "Elegir manualmente":
+            periodos_opts = sorted(df_vista["PERIODO DE LECTURA"].dropna().astype(str).unique().tolist())
+            periodos_sel  = st.multiselect("Filtrar por PERIODO(S) a incluir (vacío = todos)", periodos_opts, default=[])
+            if periodos_sel:
+                sel = set([str(p).strip().upper() for p in periodos_sel])
+                df_vista["__PERIODO__"] = df_vista["PERIODO DE LECTURA"].astype(str).str.upper()
+                df_num["__PERIODO__"]   = df_num["PERIODO DE LECTURA"].astype(str).str.upper()
+                df_vista = df_vista[df_vista["__PERIODO__"].isin(sel)].drop(columns=["__PERIODO__"], errors="ignore")
+                df_num   = df_num[df_num["__PERIODO__"].isin(sel)].drop(columns=["__PERIODO__"], errors="ignore")
+        elif modo_reporte == "Usar último mes automáticamente" and ultimo_periodo is not None:
+            periodo_str = f"{ultimo_periodo.strftime('%B').upper()} {ultimo_periodo.year}"
+            st.info(f"Usando último período detectado: **{periodo_str}**")
             df_vista["__PERIODO__"] = df_vista["PERIODO DE LECTURA"].astype(str).str.upper()
             df_num["__PERIODO__"]   = df_num["PERIODO DE LECTURA"].astype(str).str.upper()
-            df_vista = df_vista[df_vista["__PERIODO__"].isin(sel)].drop(columns=["__PERIODO__"], errors="ignore")
-            df_num   = df_num[df_num["__PERIODO__"].isin(sel)].drop(columns=["__PERIODO__"], errors="ignore")
+            df_vista = df_vista[df_vista["__PERIODO__"] == periodo_str.upper()].drop(columns=["__PERIODO__"], errors="ignore")
+            df_num   = df_num[df_num["__PERIODO__"] == periodo_str.upper()].drop(columns=["__PERIODO__"], errors="ignore")
 
+        # Construir reporte y aplicar maestro + anual/vida global
         reporte = construir_reporte_unico(df_vista, df_num, umbral_pm=0.005, agrupar_control_por="CLIENTE")
         if reporte.empty:
             st.info("No hay datos para el reporte con el filtro aplicado.")
         else:
-            # ========= NUEVO: recalcular ANUAL/VIDA por CÓDIGO global y rellenar NOMBRE/CÉDULA por maestro =========
             maestro = construir_maestro_usuarios(df_num_global)
             reporte = aplicar_maestro_a_reporte(reporte, maestro)
             reporte = recalcular_anuales_globales_por_codigo(reporte, df_num_global, umbral_pm=0.005)
@@ -1395,5 +1416,6 @@ with tab2:
                                data=excel_bytes,
                                file_name=f"{base}.xlsx",
                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
 
 
