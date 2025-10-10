@@ -919,6 +919,7 @@ def _leer_reporte_consolidado(upload) -> Tuple[Optional[pd.DataFrame], Optional[
 # ============== NUEVO: Helpers para maestro global y anual global ==============
 
 def last_nonempty(s: pd.Series) -> str:
+    """Devuelve el último valor NO vacío/NO 'nan' como texto."""
     if s is None or len(s) == 0:
         return ""
     ss = s.astype(str)
@@ -926,41 +927,135 @@ def last_nonempty(s: pd.Series) -> str:
     return ss[mask].iloc[-1] if mask.any() else ""
 
 def _to_ts(fecha_str: str):
+    # Acepta dd/mm/YYYY o dd/mm/YYYY HH:MM
     try:
-        # acepta "dd/mm/YYYY" o "dd/mm/YYYY HH:MM"
         return pd.to_datetime(fecha_str, dayfirst=True, errors="coerce")
     except Exception:
         return pd.NaT
 
+def _ensure_cols(df: pd.DataFrame, needed: List[str]) -> None:
+    """Crea columnas vacías si no existen."""
+    for c in needed:
+        if c not in df.columns:
+            df[c] = ""
+
+def _normalize_id_cols(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Normaliza nombres de columnas típicos a:
+    - CÓDIGO DE USUARIO
+    - NOMBRE
+    - CÉDULA
+    - FECHA DE LECTURA
+    - PERIODO DE LECTURA
+    """
+    ren_alias = {
+        # código
+        "CODIGO DE USUARIO": "CÓDIGO DE USUARIO",
+        "CODIGO_USUARIO": "CÓDIGO DE USUARIO",
+        "CODIGO USUARIO": "CÓDIGO DE USUARIO",
+        "CÓDIGO_USUARIO": "CÓDIGO DE USUARIO",
+
+        # cédula
+        "CEDULA": "CÉDULA",
+
+        # fecha
+        "FECHA": "FECHA DE LECTURA",
+        "FECHA LECTURA": "FECHA DE LECTURA",
+        "FECHA_LECTURA": "FECHA DE LECTURA",
+
+        # periodo
+        "PERIODO": "PERIODO DE LECTURA",
+        "PERIODO_LECTURA": "PERIODO DE LECTURA",
+        "PERIODO DE LECTURA ": "PERIODO DE LECTURA",
+    }
+    cols_norm = {}
+    for c in df.columns:
+        c2 = str(c).strip()
+        cols_norm[c] = ren_alias.get(c2.upper(), c)
+    out = df.rename(columns=cols_norm)
+    return out
+
 def construir_maestro_usuarios(df_num_global: pd.DataFrame) -> pd.DataFrame:
-    tmp = df_num_global.copy()
+    """
+    Maestro global por CÓDIGO DE USUARIO con NOMBRE y CÉDULA fiables.
+    - Acepta alias de columnas.
+    - Si no hay FECHA DE LECTURA usable, usa PERIODO DE LECTURA (primer día del mes).
+    - Hace coalesce “más reciente” -> “último no vacío”.
+    """
+    if df_num_global is None or df_num_global.empty:
+        return pd.DataFrame(columns=["CÓDIGO DE USUARIO","NOMBRE","CÉDULA"])
+
+    tmp = _normalize_id_cols(df_num_global.copy())
+
+    # Asegurar columnas mínimas
+    _ensure_cols(tmp, ["CÓDIGO DE USUARIO","NOMBRE","CÉDULA","FECHA DE LECTURA"])
+    # Generar timestamp
     tmp["__ts__"] = tmp["FECHA DE LECTURA"].apply(_to_ts)
 
-    # último por fecha visible
-    idx_last = tmp.groupby("CÓDIGO DE USUARIO")["__ts__"].idxmax()
-    last_recent = tmp.loc[idx_last, ["CÓDIGO DE USUARIO","NOMBRE","CÉDULA"]].copy()
+    # Si todas las fechas son NaT, intenta con PERIODO DE LECTURA
+    if tmp["__ts__"].isna().all() and "PERIODO DE LECTURA" in tmp.columns:
+        try:
+            tmp["__ts__"] = tmp["PERIODO DE LECTURA"].map(periodo_to_date)
+        except Exception:
+            pass  # si falla, se queda NaT y caeremos al plan B
 
-    # último no vacío como respaldo
+    # Si no hay “CÓDIGO DE USUARIO”, salimos con maestro vacío
+    if "CÓDIGO DE USUARIO" not in tmp.columns:
+        return pd.DataFrame(columns=["CÓDIGO DE USUARIO","NOMBRE","CÉDULA"])
+
+    # Plan A: “más reciente por código” usando __ts__
+    last_recent = None
+    try:
+        if "__ts__" in tmp.columns and not tmp["__ts__"].isna().all():
+            idx_last = tmp.groupby("CÓDIGO DE USUARIO")["__ts__"].idxmax()
+            # Usa .filter para no fallar si alguna columna no está
+            last_recent = tmp.loc[idx_last].filter(items=["CÓDIGO DE USUARIO","NOMBRE","CÉDULA"]).copy()
+    except Exception:
+        last_recent = None
+
+    # Plan B: si no hay timestamp utilizable, o falló el idxmax => usa “último no vacío”
     nonempty = (
-        df_num_global.groupby("CÓDIGO DE USUARIO", as_index=False)
-        .agg({"NOMBRE": last_nonempty, "CÉDULA": last_nonempty})
-        .rename(columns={"NOMBRE":"NOMBRE_NE","CÉDULA":"CÉDULA_NE"})
+        tmp.groupby("CÓDIGO DE USUARIO", as_index=False)
+           .agg({"NOMBRE": last_nonempty, "CÉDULA": last_nonempty})
+           .rename(columns={"NOMBRE":"NOMBRE_NE","CÉDULA":"CÉDULA_NE"})
     )
 
-    master = last_recent.merge(nonempty, on="CÓDIGO DE USUARIO", how="left")
-    for col in ["NOMBRE","CÉDULA"]:
-        y = master[col].astype(str).str.strip()
-        x = master[f"{col}_NE"].astype(str).str.strip()
-        master[col] = y.where(y.ne("").fillna(False), x)
-        master.drop(columns=[f"{col}_NE"], inplace=True, errors="ignore")
+    if last_recent is None or last_recent.empty:
+        # solo con no-vacíos
+        master = nonempty.rename(columns={"NOMBRE_NE":"NOMBRE","CÉDULA_NE":"CÉDULA"})
+    else:
+        master = last_recent.merge(nonempty, on="CÓDIGO DE USUARIO", how="left")
+        # coalesce: preferimos el más reciente; si vacío, el “no vacío”
+        for col in ["NOMBRE","CÉDULA"]:
+            y = master[col].astype(str).str.strip()
+            x = master[f"{col}_NE"].astype(str).str.strip()
+            master[col] = y.where(y.ne("").fillna(False), x)
+            master.drop(columns=[f"{col}_NE"], inplace=True, errors="ignore")
 
     master["NOMBRE"] = master["NOMBRE"].fillna("").astype(str).str.strip()
     master["CÉDULA"] = master["CÉDULA"].fillna("").astype(str).str.strip()
+    master = master.drop_duplicates(subset=["CÓDIGO DE USUARIO"], keep="last")
     return master[["CÓDIGO DE USUARIO","NOMBRE","CÉDULA"]]
 
 def aplicar_maestro_a_reporte(df_reporte: pd.DataFrame, maestro: pd.DataFrame) -> pd.DataFrame:
+    """
+    Rellena NOMBRE/CÉDULA en el reporte final por CÓDIGO DE USUARIO.
+    Nunca rompe si faltan columnas; crea vacías si hace falta.
+    """
+    if df_reporte is None or df_reporte.empty:
+        return df_reporte
     out = df_reporte.copy()
-    out = out.merge(maestro, on="CÓDIGO DE USUARIO", how="left", suffixes=("", "_M"))
+    out = _normalize_id_cols(out)
+
+    _ensure_cols(out, ["CÓDIGO DE USUARIO","NOMBRE","CÉDULA"])
+    if maestro is None or maestro.empty:
+        return out
+
+    m = _normalize_id_cols(maestro.copy())
+    _ensure_cols(m, ["CÓDIGO DE USUARIO","NOMBRE","CÉDULA"])
+
+    out = out.merge(m[["CÓDIGO DE USUARIO","NOMBRE","CÉDULA"]], on="CÓDIGO DE USUARIO", how="left", suffixes=("", "_M"))
+    # coalesce
     for col in ["NOMBRE","CÉDULA"]:
         base = out[col].astype(str).str.strip()
         mstr = out[f"{col}_M"].astype(str).str.strip()
@@ -1300,4 +1395,5 @@ with tab2:
                                data=excel_bytes,
                                file_name=f"{base}.xlsx",
                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
 
