@@ -889,7 +889,6 @@ def _leer_reporte_consolidado(upload) -> Tuple[Optional[pd.DataFrame], Optional[
     return df_vista, df_num, None
 
 # ============== NUEVO: Helpers para maestro global y anual global ==============
-
 def last_nonempty(s: pd.Series) -> str:
     if s is None or len(s) == 0:
         return ""
@@ -1284,8 +1283,8 @@ with tab2:
             df_vista = df_vista[df_vista["__PERIODO__"].isin(sel)].drop(columns=["__PERIODO__"], errors="ignore")
             df_num   = df_num[df_num["__PERIODO__"].isin(sel)].drop(columns=["__PERIODO__"], errors="ignore")
 
-        # ========= BARRA ÚNICA POR MES (suma total en todos los años) =========
-        st.markdown("### 📈 Barra única por mes")
+        # ========= RESUMEN POR MES (sin gráfica) =========
+        st.markdown("### 📌 Resumen por mes (sin gráfica)")
         dfn = df_num.copy()
         for c in ["_Hp10_NUM","_Hp007_NUM","_Hp3_NUM"]:
             dfn[c] = pd.to_numeric(dfn[c], errors="coerce").fillna(0.0)
@@ -1297,18 +1296,24 @@ with tab2:
 
         meses_disp = [m for m in NUM_A_MES.values() if m in set(dfn["__mes__"].dropna())]
         if not meses_disp:
-            st.info("No hay datos para graficar con el filtro actual.")
+            st.info("No hay datos para este filtro.")
         else:
             mes_elegido = st.selectbox("Elige el mes", meses_disp, index=0)
-            dsel = dfn[dfn["__mes__"] == mes_elegido]
-            total_msv = float(dsel[["_Hp10_NUM","_Hp007_NUM","_Hp3_NUM"]].sum().sum())
 
-            barra = pd.DataFrame({"Total mSv": [total_msv]}, index=[f"{mes_elegido} (todos los años)"])
-            st.bar_chart(barra)
-            st.caption(
-                f"Barra única = suma de Hp(10) + Hp(0.07) + Hp(3) de **{mes_elegido}** en todos los años "
-                f"(aplicando los filtros de cliente/periodo vigentes). Total: **{total_msv:.3f} mSv**."
-            )
+            dsel = dfn[dfn["__mes__"] == mes_elegido]
+            s10  = float(dsel["_Hp10_NUM"].sum())
+            s007 = float(dsel["_Hp007_NUM"].sum())
+            s3   = float(dsel["_Hp3_NUM"].sum())
+            total_msv = s10 + s007 + s3
+
+            st.metric(label=f"Total mSv en {mes_elegido} (todos los años)", value=f"{total_msv:.3f} mSv")
+
+            with st.expander("Ver desglose (Hp10 / Hp0.07 / Hp3)"):
+                c1, c2, c3 = st.columns(3)
+                c1.metric("Hp(10) acumulado", f"{s10:.3f} mSv")
+                c2.metric("Hp(0.07) acumulado", f"{s007:.3f} mSv")
+                c3.metric("Hp(3) acumulado", f"{s3:.3f} mSv")
+                st.caption("Cálculo aplica los filtros actuales (cliente/periodo) y suma ese mes en todos los años.")
 
         # ========= CONSTRUCCIÓN DEL REPORTE =========
         reporte = construir_reporte_unico(df_vista, df_num, umbral_pm=0.005, agrupar_control_por="CLIENTE")
@@ -1343,6 +1348,7 @@ with tab2:
                                data=excel_bytes,
                                file_name=f"{base}.xlsx",
                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
 
 
 
