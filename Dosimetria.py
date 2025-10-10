@@ -1287,59 +1287,64 @@ with tab1:
                 else:
                     st.error(f"❌ Error al subir: {res.get('error')}")
 
-# -------- TAB 2
+# ---------------- TAB 2 ----------------------------------
 with tab2:
     st.subheader("📊 Reporte Final (CONTROL primero y luego PERSONAS)")
 
     fuente = st.radio("Fuente de datos para el reporte:", [
         "Usar datos procesados en esta sesión",
         "Leer directamente de Ninox (tabla BASE DE DATOS)",
-        "Subir archivo consolidado (CSV/XLSX)"
+        "Subir archivo exportado de Ninox (CSV/XLSX)",
     ], index=0)
 
-    df_vista = st.session_state.get("df_final_vista")
-    df_num   = st.session_state.get("df_final_num")
-
+    # Botones/acciones por fuente
     if fuente == "Leer directamente de Ninox (tabla BASE DE DATOS)":
-        if st.button("🔄 Actualizar CLIENTES (leer Ninox de nuevo)"):
-            ok, err = _reload_from_ninox_fresh()
-            if ok:
-                st.success("Clientes actualizados desde Ninox.")
-            else:
-                st.warning(err or "No fue posible refrescar desde Ninox.")
-        if ("df_final_vista" not in st.session_state) or (st.session_state.df_final_vista is None):
+        colA, colB = st.columns([1,1])
+        with colA:
+            if st.button("🔄 Actualizar CLIENTES (leer Ninox de nuevo)"):
+                ok, err = _reload_from_ninox_fresh()
+                if ok:
+                    st.success("Clientes/datos actualizados desde Ninox.")
+                else:
+                    st.warning(err or "No fue posible refrescar desde Ninox.")
+        with colB:
+            st.caption("La lectura usa paginación sin límite (hasta agotar registros).")
+
+        # Carga inicial si no hay datos
+        if "df_final_vista" not in st.session_state or st.session_state.df_final_vista is None:
             ok, err = _reload_from_ninox_fresh()
             if not ok:
                 st.warning(err or "No se recibieron registros desde Ninox.")
-        df_vista = st.session_state.get("df_final_vista")
-        df_num   = st.session_state.get("df_final_num")
 
-    elif fuente == "Usar datos procesados en esta sesión":
-        if st.button("🔁 Recalcular CLIENTES (desde esta sesión)"):
-            if isinstance(st.session_state.get("df_final_vista"), pd.DataFrame) and not st.session_state.df_final_vista.empty:
-                st.success("Clientes recalculados a partir de los datos procesados.")
+    elif fuente == "Subir archivo exportado de Ninox (CSV/XLSX)":
+        upl_export = st.file_uploader("Sube el export de Ninox (p.ej. 'BASE DE DATOS - (all).csv' o .xlsx)",
+                                      type=["csv","xls","xlsx"], key="upl_export_ninox")
+        if upl_export is not None:
+            parsed = leer_ninox_export(upl_export)
+            if not parsed:
+                st.error("No se pudo leer el archivo. Verifica que sea el export de la tabla 'BASE DE DATOS'.")
             else:
-                st.info("Primero procesa datos en el TAB 1.")
-    else:
-        upl_rep = st.file_uploader("Sube archivo consolidado (CSV / XLS / XLSX)", type=["csv","xls","xlsx"], key="upl_consolidado")
-        if upl_rep is not None:
-            df_vista_u, df_num_u, err = _leer_reporte_consolidado(upl_rep)
-            if err:
-                st.error(err)
-            else:
-                st.success(f"Archivo leído: {len(df_vista_u)} filas")
-                df_vista = df_vista_u
-                df_num   = df_num_u
-                st.dataframe(df_vista.head(15), use_container_width=True)
+                df_vista_u, df_num_u = parsed
+                st.session_state.df_final_vista = df_vista_u
+                st.session_state.df_final_num   = df_num_u
+                st.success(f"Archivo cargado: {len(df_vista_u)} registro(s).")
 
+    # Nombre de archivo deseado
     nombre_archivo_base = st.text_input("Nombre de archivo para las descargas (sin extensión)", value="Reporte_Final")
-    codigo_reporte_ui   = st.text_input("Código del reporte (opcional)", value="SIN-CÓDIGO")
-    fecha_emision_ui    = st.date_input("Fecha de emisión", value=pd.Timestamp.today()).strftime("%d/%m/%Y")
-    logo_file           = st.file_uploader("Logo opcional (PNG/JPG)", type=["png","jpg","jpeg"], key="logo_excel")
+
+    # Datos del encabezado del reporte
+    codigo_reporte_ui = st.text_input("Código del reporte (opcional)", value="SIN-CÓDIGO")
+    fecha_emision_ui = st.date_input("Fecha de emisión", value=pd.Timestamp.today()).strftime("%d/%m/%Y")
+    logo_file = st.file_uploader("Logo opcional (PNG/JPG)", type=["png","jpg","jpeg"], key="logo_excel")
+
+    # Datos actuales en memoria
+    df_vista = st.session_state.get("df_final_vista")
+    df_num   = st.session_state.get("df_final_num")
 
     if df_vista is None or df_vista.empty or df_num is None or df_num.empty:
         st.info("No hay datos para mostrar en el reporte final.")
     else:
+        # Filtros
         clientes = sorted([c for c in df_vista["CLIENTE"].dropna().unique().tolist() if str(c).strip()])
         cliente_filtro = None
         if clientes:
@@ -1349,21 +1354,22 @@ with tab2:
                 df_vista = df_vista[df_vista["CLIENTE"] == cliente_filtro].copy()
                 df_num   = df_num[df_num["CLIENTE"] == cliente_filtro].copy()
 
-        periodos_opts = sorted(df_vista["PERIODO DE LECTURA"].dropna().astype(str).unique().tolist())
-        periodos_sel  = st.multiselect("Filtrar por PERIODO(S) a incluir (vacío = todos)", periodos_opts, default=[])
-        if periodos_sel:
-            sel = set([str(p).strip().upper() for p in periodos_sel])
-            df_vista["__PERIODO__"] = df_vista["PERIODO DE LECTURA"].astype(str).str.upper()
-            df_num["__PERIODO__"]   = df_num["PERIODO DE LECTURA"].astype(str).str.upper()
-            df_vista = df_vista[df_vista["__PERIODO__"].isin(sel)].drop(columns=["__PERIODO__"], errors="ignore")
-            df_num   = df_num[df_num["__PERIODO__"].isin(sel)].drop(columns=["__PERIODO__"], errors="ignore")
+        # Filtro por PERIODO (mes)
+        periodos_all = sorted(df_vista["PERIODO DE LECTURA"].dropna().astype(str).unique().tolist())
+        if periodos_all:
+            periodo_sel = st.selectbox("Filtrar por PERIODO DE LECTURA (opcional)", ["(Todos)"] + periodos_all, index=0)
+            if periodo_sel != "(Todos)":
+                df_vista = df_vista[df_vista["PERIODO DE LECTURA"] == periodo_sel].copy()
+                df_num   = df_num[df_num["PERIODO DE LECTURA"] == periodo_sel].copy()
 
+        # Construir y mostrar reporte
         reporte = construir_reporte_unico(df_vista, df_num, umbral_pm=0.005, agrupar_control_por="CLIENTE")
         if reporte.empty:
-            st.info("No hay datos para el reporte con el filtro aplicado.")
+            st.info("No hay datos para el reporte con el/los filtro(s) aplicado(s).")
         else:
             st.dataframe(reporte, use_container_width=True)
 
+            # Descargas con nombre personalizado
             base = re.sub(r"[^A-Za-z0-9_\- ]+", "_", nombre_archivo_base.strip()) or "Reporte_Final"
             csv_bytes = reporte.to_csv(index=False).encode("utf-8-sig")
             st.download_button("⬇️ Descargar CSV (tabla)", data=csv_bytes, file_name=f"{base}.csv", mime="text/csv")
